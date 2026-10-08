@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "metaflow-dq"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "pandas>=2.0",
+    "PyYAML>=6.0",
+    "SQLAlchemy>=2.0",
+    "psycopg2-binary>=2.9",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.setuptools.package-dir]
+metadata_service = "services/metadata-service/metadata_service"
+dq_service = "services/dq-service/dq_service"
+loading_service = "services/loading-service/loading_service"
+
+[tool.setuptools]
+packages = ["metadata_service", "dq_service", "loading_service"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [
+    "services/metadata-service",
+    "services/dq-service",
+    "services/loading-service",
+]

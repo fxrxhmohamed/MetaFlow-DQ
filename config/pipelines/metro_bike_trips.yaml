@@ -1,0 +1,42 @@
+# One file per dataset: everything needed to run it through every layer.
+# Loaded into the control.* tables by `python -m metadata_service.load_config`.
+
+bronze:
+  - id: metro_bike_trips_raw
+    source_system: metro_bike_share
+    source_type: csv                       # csv | kafka
+    source_location: data/landing/metro_bike_trips/*.csv
+    bronze_schema: bronze
+    bronze_table: metro_bike_trips
+    options:
+      delimiter: ","
+
+silver:
+  - id: metro_bike_trips
+    bronze_id: metro_bike_trips_raw
+    silver_schema: silver
+    silver_table: metro_bike_trips
+    quarantine_table: metro_bike_trips
+    load_type: scd1                        # append | scd1 | scd2
+    business_keys: [trip_id]
+    watermark_column: _ingested_at
+    schema_file: config/metadata/canonical_schema.yaml
+    dq:
+      - {column: trip_id, rule_id: not_null, severity: drop}
+      - {column: trip_id, rule_id: unique, severity: drop}
+      - {column: start_time, rule_id: not_null, severity: drop}
+      - {column: end_time, rule_id: not_null, severity: drop}
+      - {column: end_time, rule_id: end_after_start, severity: drop}
+      - {column: duration, rule_id: positive, severity: drop}
+      - {column: duration, rule_id: in_range, severity: warn, params: {min: 1, max: 1440}}
+      - {column: start_lat, rule_id: in_range, severity: warn, params: {min: 33.0, max: 35.0}}
+      - {column: start_lon, rule_id: in_range, severity: warn, params: {min: -119.5, max: -117.0}}
+      - {column: passholder_type, rule_id: in_set, severity: warn,
+         params: {values: [Walk-up, Monthly Pass, Annual Pass, One Day Pass, Flex Pass, Testing]}}
+      - {column: trip_route_category, rule_id: in_set, severity: warn,
+         params: {values: [One Way, Round Trip]}}
+
+gold:
+  - id: fct_trips
+    dbt_model: fct_trips
+    depends_on: [metro_bike_trips]

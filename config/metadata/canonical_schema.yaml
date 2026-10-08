@@ -1,0 +1,21 @@
+# Canonical silver schema for Metro Bike Share trips.
+# Types: string, integer, float, timestamp. Bronze lands everything as text;
+# the silver driver casts to these types (unparseable values become null and
+# are then caught by not_null rules).
+dataset: metro_bike_trips
+columns:
+  trip_id: integer
+  duration: integer
+  start_time: timestamp
+  end_time: timestamp
+  start_station: integer
+  start_lat: float
+  start_lon: float
+  end_station: integer
+  end_lat: float
+  end_lon: float
+  bike_id: string
+  plan_duration: integer
+  trip_route_category: string
+  passholder_type: string
+  bike_type: string

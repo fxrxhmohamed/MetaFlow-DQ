@@ -1,0 +1,40 @@
+# DQ rule registry -> control.dq_rules
+# rule_type:
+#   function   - name of a check in dq_service.checks (params come from the assignment)
+#   expression - pandas expression evaluated per row; {column} is replaced by the
+#                assigned column. Must evaluate to True for a passing row.
+rules:
+  - rule_id: not_null
+    rule_type: function
+    rule: not_null
+    description: Value must be present.
+
+  - rule_id: unique
+    rule_type: function
+    rule: unique
+    description: Value must not repeat within the batch.
+
+  - rule_id: in_range
+    rule_type: function
+    rule: in_range
+    description: Numeric value between params.min and params.max (inclusive).
+
+  - rule_id: in_set
+    rule_type: function
+    rule: in_set
+    description: Value must be one of params.values.
+
+  - rule_id: matches_regex
+    rule_type: function
+    rule: matches_regex
+    description: Value must fully match params.pattern.
+
+  - rule_id: end_after_start
+    rule_type: expression
+    rule: "end_time >= start_time"
+    description: A trip cannot end before it starts.
+
+  - rule_id: positive
+    rule_type: expression
+    rule: "{column} > 0"
+    description: Value must be greater than zero.
