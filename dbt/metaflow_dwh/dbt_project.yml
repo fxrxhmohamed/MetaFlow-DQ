@@ -1,0 +1,26 @@
+name: metaflow_dwh
+version: "0.1.0"
+config-version: 2
+profile: metaflow_dwh
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+
+vars:
+  virtual_station_id: 3000
+  # Timestamp formats seen in Metro trip files; staging tries them in order.
+  trip_timestamp_formats: ["MM/DD/YYYY HH24:MI", "MM/DD/YYYY HH24:MI:SS", "YYYY-MM-DD HH24:MI:SS", "YYYY-MM-DDTHH24:MI:SS"]
+
+models:
+  metaflow_dwh:
+    staging:
+      +schema: staging
+      +materialized: view
+    intermediate:
+      +schema: intermediate
+      +materialized: table
+    marts:
+      +schema: marts
+      +materialized: table

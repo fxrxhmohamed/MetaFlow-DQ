@@ -1,0 +1,14 @@
+# Copy to ~/.dbt/profiles.yml (or set DBT_PROFILES_DIR) and fill from .env
+metaflow_dwh:
+  target: dev
+  outputs:
+    dev:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+      user: "{{ env_var('SNOWFLAKE_USER') }}"
+      password: "{{ env_var('SNOWFLAKE_PASSWORD') }}"
+      role: "{{ env_var('SNOWFLAKE_ROLE', 'METAFLOW_ROLE') }}"
+      warehouse: "{{ env_var('SNOWFLAKE_WAREHOUSE', 'METAFLOW_WH') }}"
+      database: "{{ env_var('SNOWFLAKE_DATABASE', 'METAFLOW_DQ') }}"
+      schema: dbt
+      threads: 4

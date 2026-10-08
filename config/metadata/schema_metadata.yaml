@@ -1,0 +1,91 @@
+# Source -> target schema for the three Metro Bike Share datasets.
+# Drives: ingestion header checks, profiler expectations, loader column mapping,
+# dbt staging casts. `source_name` is the published header after normalisation
+# (trimmed, lower-cased, spaces -> underscores).
+
+datasets:
+  trips:
+    description: Quarterly trip files, one row per trip.
+    source: https://bikeshare.metro.net/about/data/  # metro-trips-YYYY-qN.zip
+    format: csv
+    grain: one trip
+    # trip_id is only unique inside one file (publisher note), so lineage is part of the key
+    primary_key: [source_year, source_quarter, trip_id]
+    raw_table: RAW.TRIPS
+    timezone: America/Los_Angeles
+    columns:
+      - {source_name: trip_id, target_name: trip_id, target_type: integer, nullable: false}
+      - {source_name: duration, target_name: duration_min, target_type: integer, nullable: false,
+         unit: minutes, note: "published window 1..1440, capped at 24h"}
+      - {source_name: start_time, target_name: started_at_local, target_type: timestamp, nullable: false,
+         formats: ["%m/%d/%Y %H:%M", "%m/%d/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S"],
+         note: "data page says ISO 8601; sample 2026 files use M/D/YYYY H:MM without seconds"}
+      - {source_name: end_time, target_name: ended_at_local, target_type: timestamp, nullable: false,
+         formats: ["%m/%d/%Y %H:%M", "%m/%d/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S"]}
+      - {source_name: start_station, target_name: start_station_id, target_type: integer, nullable: false,
+         references: stations.kiosk_id, note: "3000 = Virtual Station (staff remote check-in/out)"}
+      - {source_name: start_lat, target_name: start_lat, target_type: float, nullable: true}
+      - {source_name: start_lon, target_name: start_lon, target_type: float, nullable: true}
+      - {source_name: end_station, target_name: end_station_id, target_type: integer, nullable: false,
+         references: stations.kiosk_id}
+      - {source_name: end_lat, target_name: end_lat, target_type: float, nullable: true}
+      - {source_name: end_lon, target_name: end_lon, target_type: float, nullable: true}
+      - {source_name: bike_id, target_name: bike_id, target_type: string, nullable: true,
+         note: "locally unique per file like trip_id"}
+      - {source_name: plan_duration, target_name: plan_duration_days, target_type: integer, nullable: true,
+         note: "days the plan allows; data page says walk-up = 0 but sample walk-ups carry 1"}
+      - {source_name: trip_route_category, target_name: trip_route_category, target_type: string,
+         allowed: ["One Way", "Round Trip"]}
+      - {source_name: passholder_type, target_name: passholder_type, target_type: string,
+         allowed: ["Walk-up", "One Day Pass", "Monthly Pass", "Annual Pass", "Flex Pass"]}
+      - {source_name: bike_type, target_name: bike_type, target_type: string,
+         allowed: ["standard", "electric", "smart"]}
+
+  stations:
+    description: Station table, republished under a dated file name; latest status only.
+    source: https://bikeshare.metro.net/about/data/  # metro-bike-share-stations-YYYY-MM-DD.csv
+    format: csv
+    grain: one station id (per snapshot)
+    primary_key: [kiosk_id]
+    raw_table: RAW.STATIONS
+    columns:
+      - {source_name: kiosk_id, raw_header: "Kiosk ID", target_name: station_id, target_type: integer, nullable: false}
+      - {source_name: kiosk_name, raw_header: "Kiosk Name", target_name: station_name, target_type: string,
+         note: "names are reused by new ids after relaunches; never join on name"}
+      - {source_name: go_live_date, raw_header: "Go Live Date", target_name: go_live_date, target_type: date,
+         formats: ["%m/%d/%Y"]}
+      - {source_name: region, raw_header: "Region ", target_name: region, target_type: string,
+         allowed: [DTLA, Westside, North Hollywood, Pasadena, Port of LA, Free Bikes, "N/A"],
+         note: "published header has a trailing space"}
+      - {source_name: status, raw_header: "Status", target_name: status, target_type: string,
+         allowed: [Active, Inactive]}
+      - {source_name: latitude, raw_header: "Latitude", target_name: latitude, target_type: float,
+         note: "0 for virtual/dockless pseudo stations"}
+      - {source_name: longitude, raw_header: "Longitude", target_name: longitude, target_type: float}
+
+  station_status:
+    description: Live GeoJSON FeatureCollection, a point-in-time snapshot; poll it to build history.
+    source: https://bikeshare.metro.net/stations/json/
+    alternate_source: https://gbfs.bcycle.com/bcycle_lametro/station_status.json  # GBFS 1.1, station_id 'bcycle_lametro_<kioskId>'
+    format: geojson
+    grain: one station per snapshot
+    primary_key: [snapshot_ts, kioskId]
+    raw_table: RAW.STATION_STATUS_GEOJSON
+    columns:
+      - {source_name: properties.kioskId, target_name: station_id, target_type: integer, references: stations.kiosk_id}
+      - {source_name: properties.totalDocks, target_name: total_docks, target_type: integer}
+      - {source_name: properties.docksAvailable, target_name: docks_available, target_type: integer}
+      - {source_name: properties.bikesAvailable, target_name: bikes_available, target_type: integer,
+         note: "= classic + smart + electric"}
+      - {source_name: properties.classicBikesAvailable, target_name: classic_bikes_available, target_type: integer}
+      - {source_name: properties.smartBikesAvailable, target_name: smart_bikes_available, target_type: integer}
+      - {source_name: properties.electricBikesAvailable, target_name: electric_bikes_available, target_type: integer}
+      - {source_name: properties.kioskPublicStatus, target_name: public_status, target_type: string,
+         allowed: [Active, Unavailable]}
+      - {source_name: properties.kioskConnectionStatus, target_name: connection_status, target_type: string,
+         allowed: [Active, Unresponsive]}
+      - {source_name: properties.kioskUnresponsiveTime, target_name: unresponsive_since, target_type: timestamp_utc}
+      - {source_name: properties.openTime, target_name: open_time, target_type: time,
+         note: "05:45 open / 05:44 close means open 24h"}
+      - {source_name: properties.timeZone, target_name: null, note: "'Pacific Standard Time' all year; use America/Los_Angeles"}
+      - {source_name: geometry.coordinates, target_name: null, note: "[lon, lat], 5 decimals; duplicates latitude/longitude"}

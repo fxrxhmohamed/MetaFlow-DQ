@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "metaflow-dq/bike_trip_event",
+  "title": "BikeTripEvent",
+  "description": "One Metro Bike Share trip replayed onto bike.trips.raw. Field values are the published strings; typing and validation happen in the consumer, so malformed source rows still reach the DQ engine instead of failing the producer.",
+  "type": "object",
+  "required": ["event_id", "event_time", "source", "trip"],
+  "properties": {
+    "event_id": {"type": "string", "description": "uuid4"},
+    "event_time": {"type": "string", "format": "date-time", "description": "when the producer emitted it (UTC)"},
+    "source": {
+      "type": "object",
+      "required": ["file", "year", "quarter", "row_number"],
+      "properties": {
+        "file": {"type": "string"},
+        "year": {"type": "integer"},
+        "quarter": {"type": "integer", "minimum": 1, "maximum": 4},
+        "row_number": {"type": "integer"},
+        "batch_id": {"type": "string"}
+      }
+    },
+    "trip": {
+      "type": "object",
+      "required": ["trip_id", "start_time", "end_time", "start_station", "end_station"],
+      "properties": {
+        "trip_id": {"type": ["string", "null"]},
+        "duration": {"type": ["string", "null"]},
+        "start_time": {"type": ["string", "null"]},
+        "end_time": {"type": ["string", "null"]},
+        "start_station": {"type": ["string", "null"]},
+        "start_lat": {"type": ["string", "null"]},
+        "start_lon": {"type": ["string", "null"]},
+        "end_station": {"type": ["string", "null"]},
+        "end_lat": {"type": ["string", "null"]},
+        "end_lon": {"type": ["string", "null"]},
+        "bike_id": {"type": ["string", "null"]},
+        "plan_duration": {"type": ["string", "null"]},
+        "trip_route_category": {"type": ["string", "null"]},
+        "passholder_type": {"type": ["string", "null"]},
+        "bike_type": {"type": ["string", "null"]}
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,31 @@
+# Safe automatic fixes for rules in quality_rules.yaml. Anything not listed
+# here (or marked manual_review) waits for a person in the Streamlit app.
+remediations:
+  recompute_duration:
+    applies_to: [duration_matches_timestamps]
+    action: "duration_min = minutes(ended_at_local - started_at_local)"
+    auto: true
+  recompute_route_category:
+    applies_to: [route_category_consistent]
+    action: "trip_route_category = 'Round Trip' if start_station_id == end_station_id else 'One Way'"
+    auto: true
+  fill_coords_from_station_table:
+    applies_to: [start_coords_present, end_coords_present, start_coords_in_service_area, end_coords_in_service_area]
+    action: "take latitude/longitude from stations where station_id matches and station has non-zero coords"
+    auto: true
+  flip_longitude_sign:
+    applies_to: [station_coords_in_service_area]
+    when: "longitude > 0 and -longitude between -118.75 and -117.9"   # e.g. kiosk 4649
+    action: "longitude = -longitude"
+    auto: true
+  normalize_timestamp_format:
+    applies_to: [start_time_parseable, end_time_parseable]
+    action: "parse with every format in schema_metadata trips.start_time.formats"
+    auto: true
+  drop_duplicate:
+    applies_to: [no_exact_duplicates]
+    action: "keep first occurrence"
+    auto: true
+  manual_review:
+    applies_to: [start_station_exists, end_station_exists]
+    auto: false

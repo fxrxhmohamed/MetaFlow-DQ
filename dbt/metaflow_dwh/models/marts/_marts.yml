@@ -1,0 +1,43 @@
+version: 2
+
+models:
+  - name: fct_trips
+    description: One valid trip. Key is (source quarter, trip_id) because trip_id is only unique per file.
+    columns:
+      - name: trip_key
+        tests: [unique, not_null]
+      - name: start_station_key
+        tests:
+          - relationships: {to: ref('dim_station'), field: station_key}
+      - name: end_station_key
+        tests:
+          - relationships: {to: ref('dim_station'), field: station_key}
+      - name: start_date_key
+        tests:
+          - relationships: {to: ref('dim_date'), field: date_key}
+      - name: rider_plan_key
+        tests:
+          - relationships: {to: ref('dim_rider_plan'), field: rider_plan_key}
+      - name: duration_min
+        tests:
+          - dbt_utils.accepted_range: {min_value: 1, max_value: 1440}
+  - name: dim_station
+    columns:
+      - name: station_key
+        tests: [unique, not_null]
+      - name: longitude
+        tests:
+          - dbt_utils.accepted_range: {max_value: 0, config: {severity: warn}}
+  - name: dim_rider_plan
+    columns:
+      - name: rider_plan_key
+        tests: [unique, not_null]
+  - name: dim_date
+    columns:
+      - name: date_key
+        tests: [unique, not_null]
+  - name: fct_station_status
+    columns:
+      - name: station_key
+        tests:
+          - relationships: {to: ref('dim_station'), field: station_key, config: {severity: warn}}

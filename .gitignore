@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+.env
+data/
+dbt/metaflow_dwh/target/
+dbt/metaflow_dwh/dbt_packages/
+dbt/metaflow_dwh/logs/
+dbt/metaflow_dwh/profiles.yml

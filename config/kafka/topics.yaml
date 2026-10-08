@@ -1,0 +1,14 @@
+# Streaming replay of historical trips (see kafka/schemas/bike_trip_event.json)
+topics:
+  - name: bike.trips.raw
+    partitions: 3
+    key: start_station          # keeps a station's events ordered
+    retention_ms: 604800000
+  - name: bike.trips.valid
+    partitions: 3
+  - name: bike.trips.quarantine
+    partitions: 1
+  - name: bike.station_status.raw
+    partitions: 3
+    key: kioskId
+    retention_ms: 86400000

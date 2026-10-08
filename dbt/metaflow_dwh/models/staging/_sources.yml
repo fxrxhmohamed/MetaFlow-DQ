@@ -1,0 +1,24 @@
+version: 2
+
+sources:
+  - name: raw
+    database: METAFLOW_DQ
+    schema: RAW
+    tables:
+      - name: trips
+        identifier: TRIPS
+        description: Quarterly trip files as published, all text, plus lineage columns.
+        loaded_at_field: _loaded_at
+      - name: stations
+        identifier: STATIONS
+        description: Station table snapshots (one per published file date).
+      - name: station_status_geojson
+        identifier: STATION_STATUS_GEOJSON
+        description: One row per poll of the live GeoJSON feed.
+
+  - name: quarantine
+    database: METAFLOW_DQ
+    schema: QUARANTINE
+    tables:
+      - name: trips_rejected
+        identifier: TRIPS_REJECTED

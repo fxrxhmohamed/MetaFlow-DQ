@@ -1,0 +1,30 @@
+version: 2
+
+models:
+  - name: stg_trips
+    columns:
+      - name: trip_key
+        tests: [unique, not_null]
+      - name: started_at_local
+        tests:
+          - not_null:
+              config: {severity: warn}
+      - name: trip_route_category
+        tests:
+          - accepted_values:
+              values: ["One Way", "Round Trip"]
+              config: {severity: warn}
+      - name: bike_type
+        tests:
+          - accepted_values:
+              values: ["standard", "electric", "smart"]
+              config: {severity: warn}
+  - name: stg_stations
+    columns:
+      - name: station_id
+        tests: [unique, not_null]
+  - name: stg_station_status
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [snapshot_ts, station_id]
+          config: {severity: warn}

@@ -1,0 +1,28 @@
+services:
+  ingestion-service:
+    build: ./services/ingestion-service
+    env_file: .env
+    environment:
+      LANDING_ROOT: /data/landing
+    volumes: [landing:/data]
+    ports: ["8001:8001"]
+
+  metadata-service:
+    build: ./services/metadata-service
+    env_file: .env
+    environment:
+      LANDING_ROOT: /data/landing
+      PROFILE_REPORTS_ROOT: /data/reports/profiling
+    volumes: [landing:/data]
+    ports: ["8002:8002"]
+
+  loading-service:
+    build: ./services/loading-service
+    env_file: .env
+    environment:
+      LANDING_ROOT: /data/landing
+    volumes: [landing:/data]
+    ports: ["8003:8003"]
+
+volumes:
+  landing:

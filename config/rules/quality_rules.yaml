@@ -1,0 +1,68 @@
+# DQ rules for the Metro Bike Share datasets. Every rule id here is emitted by
+# the profiler (services/metadata-service/app/profiler) and evaluated by
+# dbt int_trips_validated, so the three stay in sync.
+#
+# severity: reject -> row goes to QUARANTINE.TRIPS_REJECTED
+#           warn   -> row is kept, rule id recorded in warned_rules / AUDIT.DQ_RESULTS
+# type:     not_null | unique | range | in_set | expression | reference | regex
+
+trips:
+  - {id: schema_columns_present, type: schema, severity: reject,
+     description: "file header has all 15 expected columns (file-level check)"}
+  - {id: trip_id_not_null, type: not_null, column: trip_id, severity: reject}
+  - {id: trip_id_unique_in_file, type: unique, columns: [source_year, source_quarter, trip_id], severity: reject}
+  - {id: no_exact_duplicates, type: unique, columns: all, severity: reject, remediation: drop_duplicate}
+  - {id: start_time_parseable, type: not_null, column: started_at_local, severity: reject}
+  - {id: end_time_parseable, type: not_null, column: ended_at_local, severity: reject}
+  - {id: end_after_start, type: expression, expr: "ended_at_local >= started_at_local", severity: reject}
+  - {id: duration_in_range, type: range, column: duration_min, min: 1, max: 1440, severity: reject}
+  - {id: duration_matches_timestamps, type: expression,
+     expr: "abs(duration_min - minutes(ended_at_local - started_at_local)) <= 1", severity: warn,
+     remediation: recompute_duration}
+  - {id: start_in_file_quarter, type: expression, expr: "quarter(started_at_local) == source_quarter", severity: warn}
+  - {id: start_station_not_null, type: not_null, column: start_station_id, severity: reject}
+  - {id: end_station_not_null, type: not_null, column: end_station_id, severity: reject}
+  - {id: start_station_exists, type: reference, column: start_station_id, ref: stations.station_id, severity: reject,
+     remediation: manual_review}
+  - {id: end_station_exists, type: reference, column: end_station_id, ref: stations.station_id, severity: reject,
+     remediation: manual_review}
+  - {id: start_coords_present, type: not_null, columns: [start_lat, start_lon], severity: warn,
+     remediation: fill_coords_from_station_table}
+  - {id: end_coords_present, type: not_null, columns: [end_lat, end_lon], severity: warn,
+     remediation: fill_coords_from_station_table}
+  - {id: start_coords_in_service_area, type: range, columns: {start_lat: [33.6, 34.4], start_lon: [-118.75, -117.9]},
+     severity: warn, when: "start_station_id != 3000", remediation: fill_coords_from_station_table}
+  - {id: end_coords_in_service_area, type: range, columns: {end_lat: [33.6, 34.4], end_lon: [-118.75, -117.9]},
+     severity: warn, when: "end_station_id != 3000", remediation: fill_coords_from_station_table}
+  - {id: route_category_consistent, type: expression,
+     expr: "(trip_route_category == 'Round Trip') == (start_station_id == end_station_id)",
+     severity: reject, remediation: recompute_route_category}
+  - {id: speed_plausible, type: expression, expr: "distance_km / (duration_min / 60) <= 35", severity: warn}
+  - {id: plan_matches_passholder, type: expression, severity: warn,
+     expr: "plan_duration_days in expected_plan_days[passholder_type]",
+     params: {expected_plan_days: {Walk-up: [0, 1], One Day Pass: [1], Monthly Pass: [30],
+                                   Annual Pass: [365], Flex Pass: [365]}}}
+  - {id: bike_id_not_null, type: not_null, column: bike_id, severity: warn}
+  - {id: bike_no_overlap, type: expression, severity: warn,
+     description: "a bike's next trip starts after its previous one ended"}
+  - {id: bike_type_stable_per_bike, type: expression, severity: warn,
+     description: "one bike_id should have one bike_type within a file"}
+  - {id: passholder_type_known, type: in_set, column: passholder_type, severity: warn,
+     values: [Walk-up, One Day Pass, Monthly Pass, Annual Pass, Flex Pass]}
+  - {id: bike_type_known, type: in_set, column: bike_type, severity: warn, values: [standard, electric, smart]}
+
+stations:
+  - {id: station_id_unique, type: unique, column: station_id, severity: reject}
+  - {id: go_live_parseable, type: not_null, column: go_live_date, severity: warn}
+  - {id: station_coords_in_service_area, type: range, columns: {latitude: [33.6, 34.4], longitude: [-118.75, -117.9]},
+     severity: warn, when: "latitude != 0", remediation: flip_longitude_sign}
+  - {id: station_region_consistent, type: expression, severity: warn,
+     description: "station within 10 km of its region's median position"}
+
+station_status:
+  - {id: status_bike_types_sum, type: expression,
+     expr: "bikes_available == classic_bikes_available + smart_bikes_available + electric_bikes_available",
+     severity: reject}
+  - {id: status_capacity_not_exceeded, type: expression,
+     expr: "bikes_available + docks_available <= total_docks", severity: reject}
+  - {id: station_exists, type: reference, column: station_id, ref: stations.station_id, severity: warn}
