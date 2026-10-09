@@ -1,0 +1,56 @@
+@'
+# Python environments
+.venv/
+venv/
+env/
+
+# Python cache and tests
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+build/
+dist/
+
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+.credentials/
+
+# IDE and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Logs and temporary files
+*.log
+tmp/
+temp/
+
+# Local datasets and generated outputs
+data/raw/
+data/clean/
+data/standardized/
+data/quarantine/
+data/profiling/
+
+# Local infrastructure state
+postgres_data/
+kafka_data/
+airflow/logs/
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+'@ | Set-Content -Encoding utf8 .gitignore
