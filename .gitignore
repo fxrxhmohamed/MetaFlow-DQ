@@ -1,4 +1,3 @@
-@'
 # Python environments
 .venv/
 venv/
@@ -42,6 +41,7 @@ data/raw/
 data/clean/
 data/standardized/
 data/quarantine/
+data/quality/
 data/profiling/
 
 # Local infrastructure state
@@ -53,4 +53,3 @@ airflow/logs/
 *.db
 *.sqlite
 *.sqlite3
-'@ | Set-Content -Encoding utf8 .gitignore

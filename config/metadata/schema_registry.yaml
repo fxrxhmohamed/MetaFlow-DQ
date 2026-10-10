@@ -1,0 +1,778 @@
+# ==============================================================
+# Schema registry: Egypt banking channel adoption transactions
+# ==============================================================
+#
+# The intended shape of the data: one entry per source column with its
+# type, nullability, identifier format and allowed values, plus the
+# entities and relationships packed into each denormalised row.
+#
+# This file states what the data SHOULD look like. How strictly each
+# expectation is enforced (severity, remediation) is configured in
+# config/rules/quality_rules.yaml.
+#
+# Column keys
+#   type            string | integer | decimal | boolean | date | time |
+#                   year_month
+#   role            identifier | category | measure | attribute | flag |
+#                   timestamp | derived
+#   source_format   strptime format of dates/times in the raw file
+#   nullable        true | false | conditional (rules decide when)
+#   pattern         regular expression the whole value must match
+#   allowed_values  closed list of valid values (exact spelling)
+#   min / max       inclusive bounds; "today" means the run date
+#   exclusive_min   true when the value must be strictly above min
+#   unique          true when no two rows may share the value
+#   pii             true for personal data (masked in dashboards)
+#
+# Values were taken from the profile of
+# data/raw/banking/egypt_banking_channel_adoption_raw.csv (1,013,000 rows).
+
+version: 1
+
+dataset:
+  name: banking_transactions
+  description: >
+    Card, branch and digital-channel transactions of Egyptian bank
+    customers, 2022-01 to 2025-12, one row per transaction with the
+    customer, account, bank and branch attributes repeated on each row.
+  source:
+    path: data/raw/banking/egypt_banking_channel_adoption_raw.csv
+    format: csv
+    delimiter: ","
+    encoding: utf-8-sig
+  grain: one row per transaction
+  primary_key: [transaction_id]
+  # Text that means "no value" (compared after trim, case-insensitive).
+  null_tokens: ["", "null", "none", "nan", "n/a", "na", "#n/a", "nil", "-", "--", "?"]
+  # Output formats for standardised (accepted) records.
+  canonical_formats:
+    date: "%Y-%m-%d"
+    time: "%H:%M:%S"
+    year_month: "%Y-%m"
+
+
+# --------------------------------------------------------------
+# Shared reference lists
+# --------------------------------------------------------------
+
+reference_lists:
+  digital_channels: &digital_channels [InstaPay, Internet Banking, Mobile App]
+  assisted_channels: &assisted_channels [ATM, Branch, Call Center, POS, System]
+
+  governorates: &governorates
+    - Alexandria
+    - Assiut
+    - Aswan
+    - Beheira
+    - Beni Suef
+    - Cairo
+    - Dakahlia
+    - Damietta
+    - Fayoum
+    - Gharbia
+    - Giza
+    - Ismailia
+    - Kafr El Sheikh
+    - Luxor
+    - Matrouh
+    - Minya
+    - Monufia
+    - Port Said
+    - Qalyubia
+    - Qena
+    - Red Sea
+    - Sharqia
+    - Sohag
+    - South Sinai
+    - Suez
+
+  cities: &cities
+    - 6th of October City
+    - Alexandria
+    - Assiut
+    - Aswan
+    - Banha
+    - Beni Suef
+    - Cairo
+    - Damanhur
+    - Damietta
+    - El Mahalla El Kubra
+    - Fayoum
+    - Giza
+    - Hurghada
+    - Ismailia
+    - Kafr El Sheikh
+    - Luxor
+    - Mansoura
+    - Marsa Matruh
+    - Minya
+    - New Cairo
+    - Port Said
+    - Qena
+    - Sharm El Sheikh
+    - Shibin El Kom
+    - Shubra El Kheima
+    - Sohag
+    - Suez
+    - Tanta
+    - Zagazig
+
+
+# --------------------------------------------------------------
+# Entities and relationships
+# --------------------------------------------------------------
+#
+# Each entity is identified by a key; its attributes must have exactly
+# one value per key across the whole batch. "references" points to the
+# entity a key belongs to (account -> customer, branch -> bank).
+
+entities:
+  transaction:
+    key: transaction_id
+    description: A single money movement or service event.
+    references:
+      account: account_id
+      branch: branch_id
+
+  account:
+    key: account_id
+    description: A bank account (savings, current, loan, card, CD).
+    attributes: [account_type, account_open_date, account_status, interest_rate]
+    references:
+      customer: customer_id
+
+  customer:
+    key: customer_id
+    description: The account holder.
+    attributes:
+      - customer_first_name
+      - customer_last_name
+      - gender
+      - date_of_birth
+      - marital_status
+      - email
+      - phone_number
+      - customer_city
+      - customer_governorate
+      - customer_segment
+      - occupation
+      - annual_income
+      - credit_score
+      - customer_since_date
+      - customer_digital_propensity
+
+  bank:
+    key: bank_id
+    description: The bank operating the branch.
+    attributes: [bank_name, bank_type]
+
+  branch:
+    key: branch_id
+    description: The branch servicing the account.
+    attributes: [branch_name, branch_city, branch_governorate, branch_region]
+    references:
+      bank: bank_id
+
+# Functional dependencies between non-key columns (determinant decides
+# the dependents).
+dependencies:
+  merchant:
+    determinant: merchant_name
+    dependents: [merchant_category]
+  customer_location:
+    determinant: customer_city
+    dependents: [customer_governorate]
+  # Region follows the city, not the governorate: Qalyubia branches are
+  # in Greater Cairo (Shubra El Kheima) and Delta (Banha).
+  branch_location:
+    determinant: branch_city
+    dependents: [branch_governorate, branch_region]
+
+
+# --------------------------------------------------------------
+# Columns (52, in source order)
+# --------------------------------------------------------------
+
+columns:
+
+  # ---------------- Transaction ----------------
+
+  transaction_id:
+    type: string
+    role: identifier
+    entity: transaction
+    description: Unique transaction reference.
+    nullable: false
+    pattern: '^TXN\d{10}$'
+    unique: true
+
+  transaction_date:
+    type: date
+    role: timestamp
+    entity: transaction
+    description: Business date of the transaction.
+    source_format: "%m/%d/%Y"
+    nullable: false
+    min: "2022-01-01"
+    max: today
+
+  transaction_time:
+    type: time
+    role: timestamp
+    entity: transaction
+    description: Local time of the transaction (24-hour clock).
+    source_format: "%H:%M:%S"
+    nullable: false
+
+  transaction_type:
+    type: string
+    role: category
+    entity: transaction
+    description: Kind of money movement.
+    nullable: false
+    allowed_values:
+      - Bill Payment
+      - Deposit
+      - Fee
+      - Interest Credit
+      - Loan Repayment
+      - Purchase
+      - Transfer
+      - Withdrawal
+
+  transaction_amount:
+    type: decimal
+    role: measure
+    entity: transaction
+    description: Transaction amount in the transaction currency.
+    unit: currency
+    nullable: false
+    min: 0
+    exclusive_min: true
+    max: 10000000
+
+  currency:
+    type: string
+    role: category
+    entity: transaction
+    description: ISO 4217 code of the transaction currency.
+    nullable: false
+    pattern: '^[A-Z]{3}$'
+    allowed_values: [EGP, USD, EUR, SAR, AED]
+
+  transaction_fee:
+    type: decimal
+    role: measure
+    entity: transaction
+    description: Fee charged on the transaction.
+    unit: currency
+    nullable: false
+    min: 0
+    max: 100
+
+  balance_after_transaction:
+    type: decimal
+    role: measure
+    entity: transaction
+    description: Account balance after the transaction was applied.
+    unit: currency
+    nullable: false
+    min: 0
+
+  transaction_status:
+    type: string
+    role: category
+    entity: transaction
+    description: Processing outcome.
+    nullable: false
+    allowed_values: [Completed, Failed, Pending, Reversed]
+
+  # ---------------- Channel ----------------
+
+  channel:
+    type: string
+    role: category
+    entity: transaction
+    description: Channel through which the transaction was made.
+    nullable: false
+    allowed_values: [ATM, Branch, Call Center, InstaPay, Internet Banking, Mobile App, POS, System]
+
+  card_type:
+    type: string
+    role: category
+    entity: transaction
+    description: Card used; only for card-based transactions.
+    nullable: conditional
+    allowed_values: [Mastercard Credit, Mastercard Debit, Meeza, Visa Credit, Visa Debit]
+
+  merchant_name:
+    type: string
+    role: attribute
+    entity: transaction
+    description: Merchant or biller; only for purchases and bill payments.
+    nullable: conditional
+    allowed_values:
+      - 2B Egypt
+      - Abou El Sid
+      - Al Borg Laboratories
+      - Amazon.eg
+      - B.TECH
+      - BIM Egypt
+      - Bazooka
+      - Cairo Water Company
+      - Carrefour Egypt
+      - Cleopatra Hospitals
+      - Co-op Petroleum
+      - Concrete
+      - Cook Door
+      - Dalydress
+      - e& Egypt
+      - Egypt Gas
+      - EgyptAir
+      - Egyptian Electricity Holding Co.
+      - Egyptian National Railways
+      - El Ezaby Pharmacy
+      - Gad
+      - Go Bus
+      - Jumia Egypt
+      - Kazyon
+      - Koshary El Tahrir
+      - Metro Market
+      - Misr Petroleum
+      - Noon Egypt
+      - Orange Egypt
+      - Raya Shop
+      - Seif Pharmacies
+      - Seoudi Market
+      - Shahid
+      - Spinneys Egypt
+      - Talabat
+      - TotalEnergies Egypt
+      - Town Team
+      - Tradeline
+      - Travco
+      - VOX Cinemas
+      - Vodafone Egypt
+      - WE Telecom Egypt
+      - Wataniya Petroleum
+      - Watch It
+      - Zooba
+
+  merchant_category:
+    type: string
+    role: category
+    entity: transaction
+    description: Merchant category; follows merchant_name.
+    nullable: conditional
+    allowed_values:
+      - Electronics
+      - Entertainment
+      - Fashion
+      - Fuel
+      - Groceries
+      - Healthcare
+      - Online Shopping
+      - Restaurants
+      - Travel
+      - Utilities & Telecom
+
+  channel_feature:
+    type: string
+    role: category
+    entity: transaction
+    description: Channel feature or service used.
+    nullable: false
+    allowed_values:
+      - Account Opening
+      - Account Service
+      - Balance Inquiry
+      - Beneficiary Management
+      - Bill Payment
+      - Card Controls
+      - Card Purchase
+      - Card Support
+      - Cash Deposit
+      - Cash Withdrawal
+      - Statements
+      - System Processing
+      - Transfers
+
+  digital_feature_use:
+    type: string
+    role: category
+    entity: transaction
+    description: How the channel was used.
+    nullable: false
+    allowed_values: [Assisted/Physical, Core Transaction, Feature Used]
+
+  login_success:
+    type: boolean
+    role: flag
+    entity: transaction
+    description: Whether the digital session login succeeded; digital channels only.
+    nullable: conditional
+    true_values: ["1"]
+    false_values: ["0"]
+
+  session_duration_seconds:
+    type: decimal
+    role: measure
+    entity: transaction
+    description: Digital session length in seconds; digital channels only.
+    unit: seconds
+    nullable: conditional
+    min: 0
+    exclusive_min: true
+    max: 3600
+
+  attempt_count:
+    type: integer
+    role: measure
+    entity: transaction
+    description: Number of attempts before the final status.
+    nullable: false
+    min: 1
+    max: 3
+
+  failure_reason:
+    type: string
+    role: category
+    entity: transaction
+    description: Why the transaction failed; only for failed or pending transactions.
+    nullable: conditional
+    allowed_values:
+      - Authentication Failure
+      - Customer Cancelled
+      - Insufficient Funds
+      - Limit Exceeded
+      - Network Timeout
+      - System Unavailable
+
+  estimated_channel_cost_egp:
+    type: decimal
+    role: measure
+    entity: transaction
+    description: Estimated cost to the bank of serving the transaction through its channel.
+    unit: EGP
+    nullable: false
+    min: 0
+    exclusive_min: true
+    max: 50
+
+  digital_channel_flag:
+    type: boolean
+    role: flag
+    entity: transaction
+    description: 1 when the channel is digital.
+    nullable: false
+    true_values: ["1"]
+    false_values: ["0"]
+
+  digital_migration_opportunity:
+    type: boolean
+    role: flag
+    entity: transaction
+    description: 1 when an assisted transaction could have been done digitally.
+    nullable: false
+    true_values: ["1"]
+    false_values: ["0"]
+
+  customer_digital_propensity:
+    type: decimal
+    role: measure
+    entity: customer
+    description: Model score (0-1) of the customer's likelihood to use digital channels.
+    nullable: false
+    min: 0
+    max: 1
+
+  month:
+    type: year_month
+    role: derived
+    entity: transaction
+    description: Year and month of transaction_date.
+    source_format: "%Y-%m"
+    nullable: false
+    derived_from: transaction_date
+
+  # ---------------- Account ----------------
+
+  account_id:
+    type: string
+    role: identifier
+    entity: account
+    description: Account reference.
+    nullable: false
+    pattern: '^ACC\d{7}$'
+
+  account_type:
+    type: string
+    role: category
+    entity: account
+    description: Product type of the account.
+    nullable: false
+    allowed_values: [Certificate of Deposit, Credit Card, Current, Loan, Savings]
+
+  account_open_date:
+    type: date
+    role: attribute
+    entity: account
+    description: Date the account was opened.
+    source_format: "%m/%d/%Y"
+    nullable: false
+    min: "1990-01-01"
+    max: today
+
+  account_status:
+    type: string
+    role: category
+    entity: account
+    description: Current account status.
+    nullable: false
+    allowed_values: [Active, Closed, Dormant, Frozen]
+
+  interest_rate:
+    type: decimal
+    role: attribute
+    entity: account
+    description: Annual interest rate in percent; band depends on account_type.
+    unit: percent
+    nullable: false
+    min: 0
+    max: 50
+
+  # ---------------- Customer ----------------
+
+  customer_id:
+    type: string
+    role: identifier
+    entity: customer
+    description: Customer reference.
+    nullable: false
+    pattern: '^CUST\d{6}$'
+
+  customer_first_name:
+    type: string
+    role: attribute
+    entity: customer
+    description: Given name.
+    nullable: false
+    pii: true
+    pattern: "^[A-Za-z][A-Za-z' -]*$"
+
+  customer_last_name:
+    type: string
+    role: attribute
+    entity: customer
+    description: Family name.
+    nullable: false
+    pii: true
+    pattern: "^[A-Za-z][A-Za-z' -]*$"
+
+  gender:
+    type: string
+    role: category
+    entity: customer
+    description: Gender as recorded by the bank.
+    nullable: false
+    allowed_values: [Female, Male]
+
+  date_of_birth:
+    type: date
+    role: attribute
+    entity: customer
+    description: Date of birth.
+    source_format: "%m/%d/%Y"
+    nullable: false
+    pii: true
+    min: "1900-01-01"
+    max: today
+
+  marital_status:
+    type: string
+    role: category
+    entity: customer
+    description: Marital status.
+    nullable: false
+    allowed_values: [Divorced, Married, Single, Widowed]
+
+  email:
+    type: string
+    role: attribute
+    entity: customer
+    description: Contact email address.
+    nullable: false
+    pii: true
+    pattern: '^[^@\s]+@[^@\s]+\.[^@\s]+$'
+
+  phone_number:
+    type: string
+    role: attribute
+    entity: customer
+    description: Egyptian mobile number without the leading 0 or +20 (e.g. 1012345678).
+    nullable: false
+    pii: true
+    pattern: '^1[0125]\d{8}$'
+
+  customer_city:
+    type: string
+    role: category
+    entity: customer
+    description: City of residence.
+    nullable: false
+    allowed_values: *cities
+
+  customer_governorate:
+    type: string
+    role: category
+    entity: customer
+    description: Governorate of residence.
+    nullable: false
+    allowed_values: *governorates
+
+  customer_segment:
+    type: string
+    role: category
+    entity: customer
+    description: Bank customer segment.
+    nullable: false
+    allowed_values: [Corporate, Premium, Private Banking, Retail, SME]
+
+  occupation:
+    type: string
+    role: category
+    entity: customer
+    description: Occupation.
+    nullable: false
+    allowed_values:
+      - Accountant
+      - Business Owner
+      - Doctor
+      - Driver
+      - Engineer
+      - Farmer
+      - Government Employee
+      - Housewife
+      - IT Specialist
+      - Lawyer
+      - Merchant
+      - Pharmacist
+      - Retired
+      - Sales Representative
+      - Student
+      - Teacher
+      - Unemployed
+
+  annual_income:
+    type: decimal
+    role: attribute
+    entity: customer
+    description: Declared annual income in EGP.
+    unit: EGP
+    nullable: false
+    pii: true
+    min: 0
+    exclusive_min: true
+
+  credit_score:
+    type: integer
+    role: attribute
+    entity: customer
+    description: Credit bureau score.
+    nullable: false
+    min: 300
+    max: 850
+
+  customer_since_date:
+    type: date
+    role: attribute
+    entity: customer
+    description: Date the customer relationship started.
+    source_format: "%m/%d/%Y"
+    nullable: false
+    min: "1990-01-01"
+    max: today
+
+  # ---------------- Bank and branch ----------------
+
+  bank_id:
+    type: string
+    role: identifier
+    entity: bank
+    description: Bank reference.
+    nullable: false
+    pattern: '^BNK\d{2}$'
+
+  bank_name:
+    type: string
+    role: attribute
+    entity: bank
+    description: Bank name.
+    nullable: false
+    allowed_values:
+      - Abu Dhabi Islamic Bank Egypt
+      - Alex Bank
+      - Arab African International Bank
+      - Banque du Caire
+      - Banque Misr
+      - Commercial International Bank
+      - Credit Agricole Egypt
+      - Faisal Islamic Bank of Egypt
+      - Housing and Development Bank
+      - HSBC Egypt
+      - National Bank of Egypt
+      - QNB Egypt
+
+  bank_type:
+    type: string
+    role: category
+    entity: bank
+    description: Ownership model of the bank.
+    nullable: false
+    allowed_values: [Islamic, Private, Public]
+
+  branch_id:
+    type: string
+    role: identifier
+    entity: branch
+    description: Branch reference.
+    nullable: false
+    pattern: '^BR\d{3}$'
+
+  branch_name:
+    type: string
+    role: attribute
+    entity: branch
+    description: Branch name ("<bank abbreviation> - <location>").
+    nullable: false
+    pattern: '^[A-Z]+ - .+$'
+
+  branch_city:
+    type: string
+    role: category
+    entity: branch
+    description: City of the branch.
+    nullable: false
+    allowed_values: *cities
+
+  branch_governorate:
+    type: string
+    role: category
+    entity: branch
+    description: Governorate of the branch.
+    nullable: false
+    allowed_values: *governorates
+
+  branch_region:
+    type: string
+    role: category
+    entity: branch
+    description: Geographic region of the branch.
+    nullable: false
+    allowed_values:
+      - Alexandria & North Coast
+      - Canal
+      - Delta
+      - Greater Cairo
+      - Red Sea & Sinai
+      - Upper Egypt

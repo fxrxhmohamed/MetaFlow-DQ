@@ -1,0 +1,551 @@
+# ==============================================================
+# Quality rules: Egypt banking channel adoption transactions
+# ==============================================================
+#
+# Read by the Data Quality Engine (services/dq-service). Each rule
+# detects a problem, optionally remediates it, and its severity decides
+# what happens to rows that still fail:
+#
+#   critical -> the row goes to quarantine
+#   warning  -> the row is accepted and flagged (dq_warnings column)
+#   info     -> counted only
+#
+# Rules run in this order:
+#   1. preprocessing   (whole-file clean-up)
+#   2. schema_checks   (generated from config/metadata/schema_registry.yaml)
+#   3. rules           (business, cross-column and relationship rules)
+#
+# Common rule keys
+#   id            unique, stable identifier (used in audit and results)
+#   name          short description
+#   type          see "Rule types" below
+#   column        column the rule checks (and remediates)
+#   dimension     completeness | validity | consistency | uniqueness |
+#                 timeliness | integrity
+#   severity      critical | warning | info
+#   when          applicability: the rule only checks rows matching it
+#   remediation   {action: <name>, ...options}; tried on failing values,
+#                 which are then re-checked
+#   on_accept     set_null | keep: what to do with a value that still
+#                 fails when its row is accepted (default per section)
+#   enabled       false to switch a rule off
+#
+# Rule types
+#   not_null, is_null, allowed_values {values}, pattern {pattern},
+#   range {min, max, exclusive_min, exclusive_max}, type, unique,
+#   compare {left, operator, right, offset: {years|days}},
+#   derived {source, format}, functional_dependency {entity|dependency},
+#   duplicate_rows, trim_whitespace, null_tokens
+#
+# Conditions ("when")
+#   {column: c, in: [..]} | {column: c, not_in: [..]} |
+#   {column: c, equals: v} | {column: c, is_null: true} |
+#   {column: c, not_null: true} | {all: [..]} | {any: [..]} | {not: {..}}
+#   Conditions are evaluated on cleaned values (after schema checks).
+#
+# Remediation actions
+#   trim, set_null {values?}, canonicalize {map?}, parse_number,
+#   parse_date {formats}, parse_time, reformat_id {patterns, template},
+#   derive, swap_day_month, drop_duplicates
+#   Add "target: <column>" to repair a different column than the one
+#   checked (derived rules only).
+
+version: 1
+schema: config/metadata/schema_registry.yaml
+
+severity_levels:
+  critical:
+    action: quarantine
+    description: Record cannot be trusted or loaded; held for review.
+  warning:
+    action: accept_with_flag
+    description: Record is usable; the issue is flagged for follow-up.
+  info:
+    action: accept
+    description: Observation only.
+
+
+# --------------------------------------------------------------
+# 1. Preprocessing
+# --------------------------------------------------------------
+
+preprocessing:
+
+  - id: DQ-PRE-001
+    name: Remove leading/trailing whitespace
+    type: trim_whitespace
+    columns: all
+    dimension: validity
+    severity: info
+    remediation: {action: trim}
+
+  - id: DQ-PRE-002
+    name: Null placeholders become real nulls
+    type: null_tokens
+    columns: all
+    dimension: completeness
+    severity: info
+    remediation: {action: set_null}
+
+  - id: DQ-PRE-003
+    name: Exact duplicate rows are removed
+    type: duplicate_rows
+    dimension: uniqueness
+    severity: info
+    remediation: {action: drop_duplicates}
+
+
+# --------------------------------------------------------------
+# 2. Schema checks (generated from the schema registry)
+# --------------------------------------------------------------
+#
+# One rule per column and check, with id SCH-<column>-<check>.
+# Checks: type, pattern, allowed_values, range, not_null (nullable:
+# false only), unique (unique: true only).
+
+schema_checks:
+  defaults:
+    type:           {severity: critical, dimension: validity}
+    pattern:        {severity: critical, dimension: validity}
+    allowed_values: {severity: critical, dimension: validity,
+                     remediation: {action: canonicalize}}
+    range:          {severity: critical, dimension: validity}
+    not_null:       {severity: critical, dimension: completeness}
+    unique:         {severity: critical, dimension: uniqueness}
+  # Values that still fail a schema value check in an accepted row are
+  # nulled, so accepted data always loads with its declared types.
+  on_accept: set_null
+
+  columns:
+
+    # ---- Transaction ----
+
+    transaction_date:
+      type:
+        remediation:
+          action: parse_date
+          # Day-first slash dates (31/12/2023), dash dates, compact and
+          # month-name dates.
+          formats: ["%d/%m/%Y", "%d-%m-%Y", "%Y%m%d", "%d-%b-%y", "%d-%b-%Y", "%Y-%m-%d"]
+      range: {dimension: timeliness}
+
+    transaction_time:
+      type:
+        severity: warning
+        remediation: {action: parse_time}
+      not_null: {severity: warning}
+
+    transaction_amount:
+      type:
+        remediation: {action: parse_number}
+
+    currency:
+      # allowed_values is stricter than the pattern.
+      pattern: {enabled: false}
+      allowed_values:
+        remediation:
+          action: canonicalize
+          map:
+            "LE": EGP
+            "L.E.": EGP
+            "E£": EGP
+            "EG": EGP
+            "جنيه": EGP
+            "ج.م": EGP
+
+    transaction_fee:
+      range: {severity: warning}
+
+    balance_after_transaction:
+      range: {severity: warning}
+
+    # ---- Channel ----
+
+    card_type:
+      allowed_values: {severity: warning}
+
+    merchant_name:
+      allowed_values: {severity: warning}
+
+    merchant_category:
+      allowed_values: {severity: warning}
+
+    channel_feature:
+      allowed_values: {severity: warning}
+      not_null: {severity: warning}
+
+    login_success:
+      type: {severity: warning}
+
+    session_duration_seconds:
+      type: {severity: warning}
+      range: {severity: warning}
+
+    attempt_count:
+      range: {severity: warning}
+
+    failure_reason:
+      allowed_values: {severity: warning}
+
+    estimated_channel_cost_egp:
+      type: {severity: warning}
+      range:
+        severity: warning
+        # -1, 0 and 999999 are placeholder values, not costs.
+        remediation: {action: set_null, values: [-1, 0, 999999]}
+      not_null: {severity: warning}
+
+    # ---- Account ----
+
+    account_id:
+      pattern:
+        remediation:
+          action: reformat_id
+          # '66821' -> 'ACC0066821'
+          patterns: ['^(\d{1,7})$']
+          template: "ACC{0:0>7}"
+
+    interest_rate:
+      range: {severity: warning}
+
+    # ---- Customer ----
+
+    customer_id:
+      pattern:
+        remediation:
+          action: reformat_id
+          # 'c-018743' -> 'CUST018743'
+          patterns: ['^[cC]-?(\d{6})$']
+          template: "CUST{0}"
+
+    customer_first_name:
+      pattern: {severity: warning}
+
+    customer_last_name:
+      pattern: {severity: warning}
+
+    email:
+      pattern: {severity: warning}
+
+    phone_number:
+      pattern: {severity: warning}
+
+    customer_city:
+      allowed_values: {severity: warning}
+      not_null: {severity: warning}
+
+    customer_governorate:
+      allowed_values: {severity: warning}
+      not_null: {severity: warning}
+
+    customer_segment:
+      allowed_values: {severity: warning}
+      not_null: {severity: warning}
+
+    annual_income:
+      range: {severity: warning}
+
+    credit_score:
+      range: {severity: warning}
+
+
+# --------------------------------------------------------------
+# 3. Business, cross-column and relationship rules
+# --------------------------------------------------------------
+
+rules:
+
+  # ---- Derived values ----
+
+  # month is the reliable side: most mismatches are day-first dates
+  # ('1/3/2025' with month 2025-03), so the date is re-read day-first when
+  # that agrees with month. The rest are invalid future dates, which
+  # SCH-transaction_date-range already quarantines.
+  - id: DQ-CON-001
+    name: month equals the year-month of transaction_date
+    type: derived
+    column: month
+    source: transaction_date
+    format: "%Y-%m"
+    dimension: consistency
+    severity: warning
+    remediation: {action: swap_day_month, target: transaction_date}
+
+  # ---- Channel consistency ----
+
+  - id: DQ-CON-002
+    name: Digital channels have digital_channel_flag = 1
+    type: allowed_values
+    column: digital_channel_flag
+    values: ["1"]
+    when: {column: channel, in: [InstaPay, Internet Banking, Mobile App]}
+    dimension: consistency
+    severity: warning
+
+  - id: DQ-CON-003
+    name: Assisted channels have digital_channel_flag = 0
+    type: allowed_values
+    column: digital_channel_flag
+    values: ["0"]
+    when: {column: channel, in: [ATM, Branch, Call Center, POS, System]}
+    dimension: consistency
+    severity: warning
+
+  - id: DQ-CON-004
+    name: Digital channels are used digitally
+    type: allowed_values
+    column: digital_feature_use
+    values: [Core Transaction, Feature Used]
+    when: {column: channel, in: [InstaPay, Internet Banking, Mobile App]}
+    dimension: consistency
+    severity: warning
+
+  - id: DQ-CON-005
+    name: Assisted channels are Assisted/Physical
+    type: allowed_values
+    column: digital_feature_use
+    values: [Assisted/Physical]
+    when: {column: channel, in: [ATM, Branch, Call Center, POS, System]}
+    dimension: consistency
+    severity: warning
+
+  # ---- Conditional completeness (applicability) ----
+
+  - id: DQ-CMP-001
+    name: login_success is required for digital use
+    type: not_null
+    column: login_success
+    when: {column: digital_feature_use, in: [Core Transaction, Feature Used]}
+    dimension: completeness
+    severity: warning
+
+  - id: DQ-CMP-002
+    name: login_success is empty for assisted use
+    type: is_null
+    column: login_success
+    when: {column: digital_feature_use, equals: Assisted/Physical}
+    dimension: consistency
+    severity: warning
+    remediation: {action: set_null}
+
+  - id: DQ-CMP-003
+    name: session_duration_seconds is required for digital use
+    type: not_null
+    column: session_duration_seconds
+    when: {column: digital_feature_use, in: [Core Transaction, Feature Used]}
+    dimension: completeness
+    severity: warning
+
+  - id: DQ-CMP-004
+    name: session_duration_seconds is empty for assisted use
+    type: is_null
+    column: session_duration_seconds
+    when: {column: digital_feature_use, equals: Assisted/Physical}
+    dimension: consistency
+    severity: warning
+    remediation: {action: set_null}
+
+  - id: DQ-CMP-005
+    name: card_type is required at ATMs
+    type: not_null
+    column: card_type
+    when: {column: channel, equals: ATM}
+    dimension: completeness
+    severity: warning
+
+  - id: DQ-CMP-006
+    name: card_type is empty for non-card channels
+    type: is_null
+    column: card_type
+    when: {column: channel, in: [Call Center, InstaPay, System]}
+    dimension: consistency
+    severity: warning
+    remediation: {action: set_null}
+
+  - id: DQ-CMP-007
+    name: merchant_name is required for purchases
+    type: not_null
+    column: merchant_name
+    when: {column: transaction_type, equals: Purchase}
+    dimension: completeness
+    severity: warning
+
+  - id: DQ-CMP-008
+    name: merchant_name is empty for non-merchant transactions
+    type: is_null
+    column: merchant_name
+    when: &non_merchant
+      column: transaction_type
+      in: [Deposit, Fee, Interest Credit, Loan Repayment, Transfer, Withdrawal]
+    dimension: consistency
+    severity: warning
+    remediation: {action: set_null}
+
+  - id: DQ-CMP-009
+    name: merchant_category is required for purchases
+    type: not_null
+    column: merchant_category
+    when: {column: transaction_type, equals: Purchase}
+    dimension: completeness
+    severity: warning
+
+  - id: DQ-CMP-010
+    name: merchant_category is empty for non-merchant transactions
+    type: is_null
+    column: merchant_category
+    when: *non_merchant
+    dimension: consistency
+    severity: warning
+    remediation: {action: set_null}
+
+  - id: DQ-CMP-011
+    name: failure_reason is required for failed transactions
+    type: not_null
+    column: failure_reason
+    when: {column: transaction_status, equals: Failed}
+    dimension: completeness
+    severity: warning
+
+  - id: DQ-CMP-012
+    name: failure_reason is empty for completed transactions
+    type: is_null
+    column: failure_reason
+    when: {column: transaction_status, equals: Completed}
+    dimension: consistency
+    severity: warning
+    remediation: {action: set_null}
+
+  # ---- Business values ----
+
+  - id: DQ-VAL-001
+    name: No fee on deposits, fees, interest, loan repayments and purchases
+    type: range
+    column: transaction_fee
+    min: 0
+    max: 0
+    when:
+      column: transaction_type
+      in: [Deposit, Fee, Interest Credit, Loan Repayment, Purchase]
+    dimension: validity
+    severity: warning
+
+  - id: DQ-VAL-002
+    name: Current accounts pay 0.5% interest
+    type: range
+    column: interest_rate
+    min: 0.5
+    max: 0.5
+    when: {column: account_type, equals: Current}
+    dimension: validity
+    severity: warning
+
+  - id: DQ-VAL-003
+    name: Savings interest between 5% and 15%
+    type: range
+    column: interest_rate
+    min: 5
+    max: 15
+    when: {column: account_type, equals: Savings}
+    dimension: validity
+    severity: warning
+
+  - id: DQ-VAL-004
+    name: Certificate of Deposit and Loan interest between 15% and 30%
+    type: range
+    column: interest_rate
+    min: 15
+    max: 30
+    when: {column: account_type, in: [Certificate of Deposit, Loan]}
+    dimension: validity
+    severity: warning
+
+  - id: DQ-VAL-005
+    name: Credit card interest between 30% and 45%
+    type: range
+    column: interest_rate
+    min: 30
+    max: 45
+    when: {column: account_type, equals: Credit Card}
+    dimension: validity
+    severity: warning
+
+  # ---- Timeline ----
+
+  - id: DQ-TML-001
+    name: Transaction is not before the account was opened
+    type: compare
+    left: transaction_date
+    operator: ">="
+    right: account_open_date
+    dimension: timeliness
+    severity: critical
+
+  - id: DQ-TML-002
+    name: Account is not opened before the customer relationship started
+    type: compare
+    left: account_open_date
+    operator: ">="
+    right: customer_since_date
+    dimension: timeliness
+    severity: warning
+
+  - id: DQ-TML-003
+    name: Customer was at least 18 when the relationship started
+    type: compare
+    left: customer_since_date
+    operator: ">="
+    right: date_of_birth
+    offset: {years: 18}
+    dimension: timeliness
+    severity: warning
+
+  # ---- Relationships (entities from the schema registry) ----
+
+  - id: DQ-REL-001
+    name: Each account has one set of account attributes and one customer
+    type: functional_dependency
+    entity: account
+    dimension: integrity
+    severity: warning
+
+  - id: DQ-REL-002
+    name: Each customer has one set of customer attributes
+    type: functional_dependency
+    entity: customer
+    dimension: integrity
+    severity: warning
+
+  - id: DQ-REL-003
+    name: Each bank has one name and type
+    type: functional_dependency
+    entity: bank
+    dimension: integrity
+    severity: warning
+
+  - id: DQ-REL-004
+    name: Each branch has one set of branch attributes and one bank
+    type: functional_dependency
+    entity: branch
+    dimension: integrity
+    severity: warning
+
+  - id: DQ-REL-005
+    name: Each merchant has one category
+    type: functional_dependency
+    dependency: merchant
+    dimension: consistency
+    severity: warning
+
+  - id: DQ-REL-006
+    name: Each customer city lies in one governorate
+    type: functional_dependency
+    dependency: customer_location
+    dimension: consistency
+    severity: warning
+
+  - id: DQ-REL-007
+    name: Each branch city lies in one governorate and region
+    type: functional_dependency
+    dependency: branch_location
+    dimension: consistency
+    severity: warning
