@@ -80,6 +80,19 @@ def remediate(
         new = repair_times(values)
         return new, new.notna()
 
+    if action == "replace":
+        # Ordered regex substitutions, e.g. 'BUSINESS_REVIEW_Karim' ->
+        # 'Karim', 'O?Connor' -> "O'Connor", '+201012345678' ->
+        # '01012345678'. Nothing left -> null.
+        new = values.astype("string")
+        for step in options.get("substitutions", []):
+            new = new.str.replace(
+                step["pattern"], step.get("replace", ""), regex=True,
+            )
+        new = new.str.strip()
+        new = new.mask(as_flags(new.eq("")))
+        return new, new.isna() | as_flags(new.ne(values))
+
     if action == "reformat_id":
         new = pd.Series(pd.NA, index=values.index, dtype="string")
         for pattern in options.get("patterns", []):

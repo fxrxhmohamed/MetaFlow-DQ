@@ -8,20 +8,26 @@ is acceptable: there are no severities, thresholds or pass/fail results.
 Use the profiles to write the data quality rules, which live in a
 separate rules file.
 
-Tuned for the Egypt banking channel adoption extract (one denormalised row
-per transaction with customer, account, bank and branch attributes), which
+Tuned for the Egypt banking transactions extract
+(data/raw/banking/banking_transactions.csv: one denormalised row per
+transaction with customer, account, bank and branch attributes), which
 contains:
 
-    * dates written in several formats (7/31/2023, 16-08-2025, 20251124,
-      12-Aug-24); the day/month order is worked out per separator
-    * times with mixed separators and out-of-range values (12.30.15, 25:61:00)
-    * amounts with currency text or separators (3780.11 LE, EGP 12,284.15,
-      2,021.28 ج.م, 1786,35)
-    * identifiers in more than one format (CUST043479 vs c-018743)
+    * dates written in several layouts (2022-12-19, 27-09-2022,
+      2024/05/01, 14/08/2025, 07 Sep 2023); the day/month order is worked
+      out per layout and separator
+    * times in 24-hour and 12-hour form (15:07:37, 07:19:20 PM)
     * category spellings that differ by case, spacing or underscores
-    * columns that are only filled for some categories (e.g. session
-      duration only for digital channels)
-    * entity attributes repeated on every row (customer, account, branch)
+      ('Mobile App', 'MOBILE APP', 'Mobile_App', '  Mobile App  ') and
+      catch-all labels ('other')
+    * columns that are only filled for some categories (merchant only for
+      purchases and bill payments, failure reason only for failed
+      transactions, login result only for digital channels)
+    * entity attributes repeated on every row (customer, account, branch),
+      with placeholder values shared by many customers ('invalid-email',
+      'abc#123')
+    * repeated transaction ids whose rows differ in a few columns
+    * placeholder numbers at the edge of the range (credit_score 0)
 
 Usage examples
 --------------
@@ -35,11 +41,15 @@ Usage examples
     # Custom null tokens and delimiter, no cross-column checks
     python src/profiler.py --null-tokens NULL N/A unknown --delimiter ";" \
         --skip-relationships
+
+    # An ingested file: profile.json goes next to its manifest
+    python src/profiler.py --ingestion ING_20261011_001
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import re
@@ -48,6 +58,7 @@ import warnings
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 
@@ -66,6 +77,7 @@ PROJECT_ROOT = _default_project_root()
 
 DEFAULT_INPUT = PROJECT_ROOT / "data" / "raw" / "banking"
 DEFAULT_OUTPUT = PROJECT_ROOT / "data" / "profiling"
+DEFAULT_RAW_ROOT = PROJECT_ROOT / "data" / "raw"
 DEFAULT_DATASET_NAME = "banking_transactions"
 
 # Text that means "no value". Compared after strip + casefold.
@@ -92,13 +104,36 @@ TOP_N = 10
 # Values beyond this many IQRs outside the quartiles are counted.
 FAR_OUTLIER_IQR = 3.0
 
+# A min/max value that is a far outlier and holds at least this share of
+# the values is reported as a possible placeholder (e.g. credit_score 0).
+REPEATED_EXTREME_MIN_SHARE = 0.001
+
+# Catch-all category labels, compared after normalize_text.
+GENERIC_CATEGORY_VALUES = frozenset({
+    "other", "others", "unknown", "misc", "miscellaneous", "undefined",
+    "unspecified", "not specified", "tbd",
+})
+
 # Cross-column checks.
-# A column is an attribute of a key when at least this share of the
-# repeated keys always carries the same value in it.
+# An identifier unique on at least this share of rows is a near key: its
+# repeats are reported as duplicate keys, not as an entity.
+NEAR_KEY_MIN_SHARE = 0.99
+# A column is an attribute of a key when at least this share of its rows
+# agrees with the key's most common value...
 ENTITY_ATTRIBUTE_MIN_SHARE = 0.95
+# ...and knowing the key removes most of the disagreement: the rows that
+# disagree are at most this share of those that would disagree with the
+# column's overall most common value. Stops skewed columns (currency is
+# almost always EGP) from looking like attributes of every key.
+ENTITY_MAX_ERROR_RATIO = 0.2
+# In an attribute that nearly identifies its key (email, phone), a value
+# held by at least this many keys, and this many times the usual number,
+# is reported as shared.
+SHARED_VALUE_MIN_KEYS = 10
+SHARED_VALUE_FACTOR = 10
 # Only columns with this share of missing values (and the reverse) are
 # checked for missingness that depends on a category.
-MISSINGNESS_MIN_SHARE = 0.05
+MISSINGNESS_MIN_SHARE = 0.01
 # A category "decides" missingness when at least this share of its rows
 # is missing, or at most 1 - this share.
 MISSINGNESS_CATEGORY_PURITY = 0.98
@@ -144,6 +179,8 @@ ISO_DATE_PATTERN = r"^\d{4}-\d{2}(?:-\d{2})?(?:[T\s]\d{2}:\d{2}.*)?$"
 COMPACT_DATE_PATTERN = r"^(?:19|20)\d{6}$"
 # 7/31/2023, 16-08-2025, 3.4.25: day/month order decided from the data.
 NUMERIC_DATE_PATTERN = r"^(\d{1,2})([/.\-])(\d{1,2})\2(\d{4}|\d{2})$"
+# 2024/05/01, 2024.5.1 (year first, not ISO): order decided the same way.
+YEAR_FIRST_DATE_PATTERN = r"^(\d{4})([/.])(\d{1,2})\2(\d{1,2})$"
 
 # A number inside text, e.g. 'EGP 12,284.15' or '3780.11 LE'.
 NUMBER_IN_TEXT_PATTERN = r"[+-]?\d[\d,.\s]*\d|[+-]?\d"
@@ -298,17 +335,78 @@ def _to_datetime(values: pd.Series, **kwargs: Any) -> pd.Series:
     return parsed.dt.tz_localize(None).dt.as_unit("us")
 
 
+def _read_numeric_dates(
+    parts: pd.DataFrame,
+    year_first: bool,
+) -> tuple[pd.Series, list[dict[str, Any]]]:
+    """Read dates split into year, separator and the two day/month parts.
+
+    The day/month order is decided per separator from values that can
+    only be read one way (a part above 12); ties are read month first.
+    """
+
+    first = to_numeric_clean(parts["first"])
+    second = to_numeric_clean(parts["second"])
+    year = to_numeric_clean(parts["year"])
+    # Two-digit years: 00-69 -> 2000s, 70-99 -> 1900s.
+    century = (year.lt(70) * 2000 + year.ge(70) * 1900).where(
+        year.lt(100), 0,
+    )
+    year = year + century
+
+    day_first = pd.Series(False, index=parts.index)
+    orders: list[dict[str, Any]] = []
+
+    for separator in sorted(parts["separator"].dropna().unique()):
+        in_group = as_flags(parts["separator"].eq(separator))
+        a, b = first[in_group], second[in_group]
+
+        day_first_evidence = int(a.gt(12).sum())
+        month_first_evidence = int(b.gt(12).sum())
+        is_day_first = day_first_evidence > month_first_evidence
+        order = "day/month" if is_day_first else "month/day"
+
+        day_first[in_group] = is_day_first
+        orders.append({
+            "separator": separator,
+            "layout": f"yyyy{separator}nn{separator}nn" if year_first
+            else f"nn{separator}nn{separator}yyyy",
+            "read_as": f"year/{order}" if year_first else f"{order}/year",
+            "day_first": is_day_first,
+            "day_first_evidence": day_first_evidence,
+            "month_first_evidence": month_first_evidence,
+            "ambiguous_count": int(
+                (a.le(12) & b.le(12) & a.ne(b)).sum()
+            ),
+        })
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        dates = pd.to_datetime(
+            pd.DataFrame({
+                "year": year,
+                "month": second.where(day_first, first),
+                "day": first.where(day_first, second),
+            }),
+            errors="coerce",
+        )
+
+    return dates.dt.as_unit("us"), orders
+
+
 def parse_dates(
     values: pd.Series,
 ) -> tuple[pd.Series, list[dict[str, Any]]]:
     """Parse values as dates; unparseable values -> NaT.
 
-    Known layouts are read with explicit formats. For d/m/y style values
-    the day/month order is decided per separator from values that can
-    only be read one way (a part above 12). Anything else falls back to
-    pandas' mixed-format parser.
+    Known layouts are read with explicit formats. For d/m/y and y/m/d
+    style values the day/month order is decided per layout and separator
+    from values that can only be read one way (a part above 12). Anything
+    else (07 Sep 2023, 12-Aug-24) falls back to pandas' mixed-format
+    parser.
 
-    Returns the dates and, per separator, how the order was decided.
+    Returns the dates and, per layout and separator, how the order was
+    decided.
     """
 
     text = values.astype("string").str.strip()
@@ -325,64 +423,75 @@ def parse_dates(
     if compact.any():
         result[compact] = _to_datetime(text[compact], format="%Y%m%d")
 
-    # ---- Numeric d/m/y or m/d/y ----
-    parts = text[~iso & ~compact].str.extract(NUMERIC_DATE_PATTERN)
-    parts = parts[parts[0].notna()]
+    handled = iso | compact
 
-    if len(parts):
-        first = to_numeric_clean(parts[0])
-        second = to_numeric_clean(parts[2])
-        year = to_numeric_clean(parts[3])
-        # Two-digit years: 00-69 -> 2000s, 70-99 -> 1900s.
-        century = (year.lt(70) * 2000 + year.ge(70) * 1900).where(
-            year.lt(100), 0,
-        )
-        year = year + century
-
-        day_first = pd.Series(False, index=parts.index)
-
-        for separator in sorted(parts[1].dropna().unique()):
-            in_group = as_flags(parts[1].eq(separator))
-            a, b = first[in_group], second[in_group]
-
-            day_first_evidence = int(a.gt(12).sum())
-            month_first_evidence = int(b.gt(12).sum())
-            is_day_first = day_first_evidence > month_first_evidence
-
-            day_first[in_group] = is_day_first
-            orders.append({
-                "separator": separator,
-                "read_as": "day/month/year" if is_day_first
-                else "month/day/year",
-                "day_first_evidence": day_first_evidence,
-                "month_first_evidence": month_first_evidence,
-                "ambiguous_count": int(
-                    (a.le(12) & b.le(12) & a.ne(b)).sum()
-                ),
-            })
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            numeric_dates = pd.to_datetime(
-                pd.DataFrame({
-                    "year": year,
-                    "month": second.where(day_first, first),
-                    "day": first.where(day_first, second),
-                }),
-                errors="coerce",
-            )
-
-        result[parts.index] = numeric_dates.dt.as_unit("us")
-
-    # ---- Anything else: 12-Aug-24, 'Aug 12, 2024', ... ----
-    rest = (
-        ~iso & ~compact & ~text.index.isin(parts.index)
-        & as_flags(text.ne(""))
+    # ---- Numeric d/m/y or m/d/y, then y/m/d or y/d/m ----
+    layouts = (
+        (NUMERIC_DATE_PATTERN, ["first", "separator", "second", "year"],
+         False),
+        (YEAR_FIRST_DATE_PATTERN, ["year", "separator", "first", "second"],
+         True),
     )
+
+    for pattern, names, year_first in layouts:
+        parts = text[~handled].str.extract(pattern)
+        parts.columns = names
+        parts = parts[parts["year"].notna()]
+
+        if len(parts):
+            dates, layout_orders = _read_numeric_dates(parts, year_first)
+            result[parts.index] = dates
+            orders.extend(layout_orders)
+            handled = handled | text.index.isin(parts.index)
+
+    # ---- Anything else: 07 Sep 2023, 12-Aug-24, 'Aug 12, 2024', ... ----
+    rest = ~handled & as_flags(text.ne(""))
     if rest.any():
         result[rest] = _to_datetime(text[rest], format="mixed")
 
     return result, orders
+
+
+def parse_times(values: pd.Series) -> pd.DataFrame:
+    """Split times into parts and read them as seconds after midnight.
+
+    Columns: hour, minute, second, has_am_pm, parsed, out_of_range and
+    seconds ('07:19:20 PM' and '19:19:20' give the same seconds; NaN when
+    unparseable or out of range).
+    """
+
+    parts = values.str.strip().str.casefold().str.extract(TIME_PATTERN)
+
+    hour = to_numeric_clean(parts[0])
+    minute = to_numeric_clean(parts[1])
+    second = to_numeric_clean(parts[2])
+    am_pm = parts[3].str.replace(".", "", regex=False)
+    has_am_pm = am_pm.notna()
+
+    parsed = hour.notna()
+    out_of_range = parsed & (
+        hour.gt(23)
+        | (has_am_pm & (hour.gt(12) | hour.eq(0)))
+        | minute.gt(59)
+        | second.gt(59)
+    )
+
+    hour_24 = hour.where(
+        ~has_am_pm, hour % 12 + as_flags(am_pm.eq("pm")) * 12,
+    )
+    seconds = (hour_24 * 3600 + minute * 60 + second.fillna(0)).where(
+        parsed & ~out_of_range
+    )
+
+    return pd.DataFrame({
+        "hour": hour,
+        "minute": minute,
+        "second": second,
+        "has_am_pm": has_am_pm,
+        "parsed": parsed,
+        "out_of_range": out_of_range,
+        "seconds": seconds,
+    })
 
 
 def make_note(code: str, detail: str) -> dict[str, str]:
@@ -638,13 +747,26 @@ def profile_numeric(
     quantiles = valid.quantile([0.01, 0.05, 0.25, 0.75, 0.95, 0.99])
     q1, q3 = quantiles.get(0.25), quantiles.get(0.75)
     far_outlier_count = 0
+    repeated_extremes: list[dict[str, Any]] = []
 
     # With no spread between the quartiles every other value would count.
     if len(valid) and q3 > q1:
         spread = FAR_OUTLIER_IQR * (q3 - q1)
-        far_outlier_count = int(
-            (valid.lt(q1 - spread) | valid.gt(q3 + spread)).sum()
-        )
+        far = valid.lt(q1 - spread) | valid.gt(q3 + spread)
+        far_outlier_count = int(far.sum())
+
+        # The same far-off min/max on many rows looks like a stand-in
+        # for "unknown" (credit_score 0) rather than a real measurement.
+        for extreme in (valid.min(), valid.max()):
+            count = int(valid.eq(extreme).sum())
+            if (
+                (extreme < q1 - spread or extreme > q3 + spread)
+                and count >= 2
+                and count >= REPEATED_EXTREME_MIN_SHARE * len(valid)
+            ):
+                repeated_extremes.append(
+                    {"value": as_number(extreme), "count": count}
+                )
 
     profile.update({
         "numeric_parse_success_rate": round(
@@ -664,6 +786,7 @@ def profile_numeric(
             for q, value in quantiles.items()
         },
         "far_outlier_count": far_outlier_count,
+        "repeated_extreme_values": repeated_extremes,
         "count_at_min": int(valid.eq(valid.min()).sum()),
         "count_at_max": int(valid.eq(valid.max()).sum()),
         "zero_count": int(valid.eq(0).sum()),
@@ -703,6 +826,14 @@ def profile_numeric(
             "IQRs outside the quartiles.",
         ))
 
+    for extreme in repeated_extremes:
+        flags.append(make_note(
+            "REPEATED_EXTREME_VALUE",
+            f"{extreme['value']} appears {extreme['count']} times far "
+            "outside the other values; it may be a cap, a default or a "
+            "stand-in for an unknown value.",
+        ))
+
     if leading_zero_count:
         flags.append(make_note(
             "LEADING_ZEROS",
@@ -724,7 +855,8 @@ def profile_dates(
     valid_dates = dates.dropna()
     failures = values[dates.isna()]
     failure_count = len(failures)
-    patterns, pattern_count = format_patterns(values, collapse=True)
+    # Lengths are kept so 2022-12-19 and 19-12-2022 stay apart.
+    patterns, pattern_count = format_patterns(values, collapse=False)
 
     now = pd.Timestamp.now()
     future_count = int(valid_dates.gt(now).sum())
@@ -757,13 +889,13 @@ def profile_dates(
         flags.append(note)
 
     for order in orders:
-        separator = order["separator"]
+        layout = order["layout"]
         both = order["day_first_evidence"] and order["month_first_evidence"]
 
         if both:
             flags.append(make_note(
                 "AMBIGUOUS_DATES",
-                f"Dates using '{separator}' are written both day-first "
+                f"Dates laid out as '{layout}' are written both day-first "
                 f"({order['day_first_evidence']} values) and month-first "
                 f"({order['month_first_evidence']} values); "
                 f"{order['ambiguous_count']} values could be either and "
@@ -774,16 +906,27 @@ def profile_dates(
         ):
             flags.append(make_note(
                 "AMBIGUOUS_DATES",
-                f"The day/month order of dates using '{separator}' cannot "
-                f"be worked out; {order['ambiguous_count']} values were "
-                f"read as {order['read_as']}.",
+                f"The day/month order of dates laid out as '{layout}' "
+                f"cannot be worked out; {order['ambiguous_count']} values "
+                f"were read as {order['read_as']}.",
             ))
 
-    if len({order["read_as"] for order in orders}) > 1:
+    # Day-first next to month-first among year-last dates is the risky
+    # mix; year-first dates (2024/05/01) are normally year/month/day.
+    year_last = [o for o in orders if not o["layout"].startswith("yyyy")]
+    year_first_unusual = [
+        o for o in orders
+        if o["layout"].startswith("yyyy") and o["day_first"]
+    ]
+
+    if (
+        len({order["day_first"] for order in year_last}) > 1
+        or year_first_unusual
+    ):
         flags.append(make_note(
             "MIXED_DATE_CONVENTIONS",
             "; ".join(
-                f"'{order['separator']}' dates read as {order['read_as']}"
+                f"'{order['layout']}' dates read as {order['read_as']}"
                 for order in orders
             ) + ".",
         ))
@@ -810,20 +953,9 @@ def profile_times(
 
     value_count = len(values)
     folded = values.str.strip().str.casefold()
-    parts = folded.str.extract(TIME_PATTERN)
-
-    hour = to_numeric_clean(parts[0])
-    minute = to_numeric_clean(parts[1])
-    second = to_numeric_clean(parts[2])
-    has_am_pm = parts[3].notna()
-
-    parsed = hour.notna()
-    out_of_range = parsed & (
-        hour.gt(23)
-        | (has_am_pm & (hour.gt(12) | hour.eq(0)))
-        | minute.gt(59)
-        | second.gt(59)
-    )
+    times = parse_times(values)
+    parsed = times["parsed"]
+    out_of_range = times["out_of_range"]
 
     failures = values[~parsed]
     invalid = values[out_of_range]
@@ -917,11 +1049,59 @@ def profile_format(
             flags.append(note)
 
 
+def canonical_values(
+    values: pd.Series,
+    stripped: pd.Series,
+    inferred: dict[str, Any],
+) -> pd.Series:
+    """The non-missing values in one comparable form.
+
+    Used by the cross-column checks so formatting noise is not mistaken
+    for a different value: '  MALE ', 'Male_' and 'male' -> 'male';
+    '07 Sep 2023' and '2023-09-07' -> the same date; '07:19:20 PM' and
+    '19:19:20' -> the same time. Values that cannot be read keep their
+    stripped text.
+    """
+
+    logical_type = inferred["type"]
+
+    if logical_type in ("categorical", "text", "boolean", "currency_code"):
+        distinct = stripped.dropna().unique()
+        mapping = dict(zip(
+            distinct, normalize_text(pd.Series(distinct, dtype="string")),
+        ))
+        return stripped.map(mapping)
+
+    if logical_type == "email":
+        return stripped.str.casefold()
+
+    if logical_type in ("integer", "float"):
+        parsed = inferred["numeric"]
+    elif logical_type in ("date", "datetime"):
+        parsed = inferred["dates"]
+    elif logical_type == "time":
+        parsed = parse_times(values)["seconds"]
+    else:
+        return stripped
+
+    readable = parsed.notna()
+    if readable.all():
+        return parsed
+
+    canonical = stripped.astype(object)
+    canonical[readable] = parsed[readable]
+    return canonical
+
+
 def profile_column(
     series: pd.Series,
     masks: dict[str, pd.Series],
-) -> dict[str, Any]:
-    """Profile a single column without modifying the source data."""
+) -> tuple[dict[str, Any], pd.Series]:
+    """Profile a single column without modifying the source data.
+
+    Returns the profile and the canonical non-missing values (see
+    canonical_values) for the cross-column checks.
+    """
 
     column = str(series.name)
     values = series[~masks["missing"]]
@@ -1069,9 +1249,26 @@ def profile_column(
                 f"spelling (case, spacing or separators): {examples}.",
             ))
 
+        if logical_type in ("categorical", "text"):
+            generic = counts[
+                as_flags(normalized.isin(GENERIC_CATEGORY_VALUES)).to_numpy()
+            ]
+            profile["generic_value_count"] = int(generic.sum())
+
+            if len(generic):
+                found = ", ".join(
+                    f"'{value}' x{count}"
+                    for value, count in generic.head(5).items()
+                )
+                flags.append(make_note(
+                    "GENERIC_VALUES",
+                    f"{int(generic.sum())} values are catch-all labels "
+                    f"rather than a specific category: {found}.",
+                ))
+
     profile["observations"] = flags
 
-    return profile
+    return profile, canonical_values(values, stripped, inferred)
 
 
 # ============================================================
@@ -1079,37 +1276,122 @@ def profile_column(
 # ============================================================
 
 def category_codes(
-    present: pd.DataFrame,
+    canonical: dict[str, pd.Series],
+    index: pd.Index,
 ) -> tuple[pd.DataFrame, dict[str, pd.Index]]:
-    """Integer code per distinct value (NaN when missing), for fast
-    grouping. Also returns the value behind each code."""
+    """Integer code per distinct canonical value (-1 when missing), for
+    fast grouping. Also returns the value behind each code."""
 
-    codes: dict[str, pd.Series] = {}
+    codes: dict[str, np.ndarray] = {}
     uniques: dict[str, pd.Index] = {}
 
-    for column in present.columns:
-        column_codes, column_uniques = pd.factorize(present[column])
-        codes[column] = pd.Series(column_codes, index=present.index)
-        codes[column] = codes[column].where(codes[column].ge(0))
+    for column, values in canonical.items():
+        column_codes, column_uniques = pd.factorize(values.reindex(index))
+        codes[column] = column_codes.astype(np.int64)
         uniques[column] = pd.Index(column_uniques)
 
-    return pd.DataFrame(codes), uniques
+    return pd.DataFrame(codes, index=index), uniques
 
 
-def entity_attributes(
-    codes: pd.DataFrame,
-    columns: list[dict[str, Any]],
+def key_value_stats(
+    key_codes: np.ndarray,
+    value_codes: np.ndarray,
+) -> dict[str, Any] | None:
+    """How consistently each key carries one value of another column.
+
+    Only rows where both are present count. Returns None when there are
+    no such rows.
+    """
+
+    both = (key_codes >= 0) & (value_codes >= 0)
+    if not both.any():
+        return None
+
+    keys = key_codes[both]
+    values = value_codes[both]
+    width = int(values.max()) + 1
+
+    pairs, pair_rows = np.unique(keys * width + values, return_counts=True)
+    pair_keys = pairs // width
+    pair_values = pairs % width
+
+    # np.unique sorts, so each key's pairs are next to each other.
+    starts = np.flatnonzero(np.r_[True, pair_keys[1:] != pair_keys[:-1]])
+    values_per_key = np.diff(np.r_[starts, len(pairs)])
+    rows_per_key = np.add.reduceat(pair_rows, starts)
+    majority_rows = int(np.maximum.reduceat(pair_rows, starts).sum())
+
+    return {
+        "rows": len(keys),
+        "keys": len(starts),
+        # Keys seen on two or more rows: only these can show a conflict.
+        "testable_keys": int((rows_per_key >= 2).sum()),
+        "conflicting_keys": int((values_per_key > 1).sum()),
+        # Rows that differ from their key's most common value.
+        "conflicting_rows": len(keys) - majority_rows,
+        "top_value_rows": int(np.bincount(values).max()),
+        "pair_values": pair_values,
+    }
+
+
+def shared_values(
+    stats: dict[str, Any],
+    uniques: pd.Index,
 ) -> list[dict[str, Any]]:
+    """Values of a near-identifying attribute held by unusually many keys.
+
+    E.g. 'invalid-email' carried by thousands of customers, when each
+    real email belongs to one. Empty when the column does not come close
+    to identifying its key (names, cities).
+    """
+
+    keys_per_value = np.bincount(stats["pair_values"])
+    used = keys_per_value[keys_per_value > 0]
+
+    if len(used) < 0.5 * stats["keys"]:
+        return []
+
+    limit = max(
+        SHARED_VALUE_MIN_KEYS,
+        SHARED_VALUE_FACTOR * float(np.median(used)),
+    )
+    shared = np.flatnonzero(keys_per_value >= limit)
+    shared = shared[np.argsort(-keys_per_value[shared])][:TOP_N]
+
+    return [
+        {
+            "value": safe_value(uniques[code]),
+            "key_count": int(keys_per_value[code]),
+        }
+        for code in shared
+    ]
+
+
+def key_relationships(
+    codes: pd.DataFrame,
+    uniques: dict[str, pd.Index],
+    columns: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """For each repeated identifier, the columns that belong to it.
 
     In a denormalised extract a customer_id repeats on every transaction
     and should always carry the same name, email, date of birth, etc.
-    A column counts as an attribute of the key when nearly every repeated
-    key has a single value in it; keys with more than one value are
-    reported as conflicts.
+    Values are compared in canonical form, so 'Male' vs 'MALE' or
+    2002-04-15 vs 15/04/2002 is not a conflict. A column counts as an
+    attribute of the key when nearly all its rows agree with their key's
+    most common value, and far more than they agree with the column's
+    overall most common value.
+
+    Identifiers that are almost unique (transaction_id) are not entities;
+    their repeated values are reported as duplicate keys, with the
+    columns in which the repeated rows differ.
+
+    Returns (entity attributes, duplicate keys).
     """
 
-    results: list[dict[str, Any]] = []
+    row_count = len(codes)
+    entities: list[dict[str, Any]] = []
+    duplicate_keys: list[dict[str, Any]] = []
 
     for profile in columns:
         if (
@@ -1119,39 +1401,84 @@ def entity_attributes(
             continue
 
         key = profile["column_name"]
-        key_codes = codes[key]
-        repeated = key_codes.notna() & key_codes.duplicated(keep=False)
-
-        others = [column for column in codes.columns if column != key]
-        grouped = codes.loc[repeated, others].groupby(key_codes[repeated])
-        conflicts = grouped.max().gt(grouped.min())
-        repeated_keys = len(conflicts)
+        key_codes = codes[key].to_numpy()
+        repeated = (key_codes >= 0) & pd.Series(key_codes).duplicated(
+            keep=False
+        ).to_numpy()
+        repeated_keys = len(np.unique(key_codes[repeated]))
 
         if not repeated_keys:
             continue
 
-        # Only keys with two or more values in a column say anything
-        # about it; mostly empty columns would otherwise look consistent.
-        testable = grouped.count().ge(2)
-        attributes = [
-            column for column in others
-            if testable[column].mean() >= 0.5
-            and 1 - conflicts[column].sum() / testable[column].sum()
-            >= ENTITY_ATTRIBUTE_MIN_SHARE
-        ]
+        others = [column for column in codes.columns if column != key]
 
-        results.append({
+        # ---- Near key: describe the repeats, not an entity ----
+        if profile["unique_count"] >= NEAR_KEY_MIN_SHARE * row_count:
+            repeated_codes = np.where(repeated, key_codes, -1)
+            differing: dict[str, int] = {}
+
+            for column in others:
+                stats = key_value_stats(
+                    repeated_codes, codes[column].to_numpy(),
+                )
+                if stats and stats["conflicting_keys"]:
+                    differing[column] = stats["conflicting_keys"]
+
+            duplicate_keys.append({
+                "key_column": key,
+                "repeated_key_count": repeated_keys,
+                "row_count": int(repeated.sum()),
+                "differing_columns": dict(
+                    sorted(differing.items(), key=lambda item: -item[1])
+                ),
+            })
+            continue
+
+        # ---- Entity key: find its attributes ----
+        attributes: list[str] = []
+        conflicting_keys: dict[str, int] = {}
+        conflicting_rows: dict[str, int] = {}
+        shared: dict[str, list[dict[str, Any]]] = {}
+
+        for column in others:
+            stats = key_value_stats(key_codes, codes[column].to_numpy())
+
+            # Only keys with two or more values in a column say anything
+            # about it; mostly empty columns would otherwise look
+            # consistent.
+            if not stats or stats["testable_keys"] < 0.5 * repeated_keys:
+                continue
+
+            error = stats["conflicting_rows"] / stats["rows"]
+            baseline_error = 1 - stats["top_value_rows"] / stats["rows"]
+
+            if (
+                error > 1 - ENTITY_ATTRIBUTE_MIN_SHARE
+                or baseline_error == 0
+                or error > ENTITY_MAX_ERROR_RATIO * baseline_error
+            ):
+                continue
+
+            attributes.append(column)
+
+            if stats["conflicting_keys"]:
+                conflicting_keys[column] = stats["conflicting_keys"]
+                conflicting_rows[column] = stats["conflicting_rows"]
+
+            values = shared_values(stats, uniques[column])
+            if values:
+                shared[column] = values
+
+        entities.append({
             "key_column": key,
             "repeated_key_count": repeated_keys,
             "attribute_columns": attributes,
-            "conflicting_key_counts": {
-                column: int(conflicts[column].sum())
-                for column in attributes
-                if conflicts[column].any()
-            },
+            "conflicting_key_counts": conflicting_keys,
+            "conflicting_row_counts": conflicting_rows,
+            "shared_values": shared,
         })
 
-    return results
+    return entities, duplicate_keys
 
 
 def conditional_missingness(
@@ -1162,9 +1489,11 @@ def conditional_missingness(
 ) -> list[dict[str, Any]]:
     """Columns whose missing values depend on a category.
 
-    E.g. session_duration_seconds is only filled for digital channels.
-    For each partly missing column, finds the categorical column whose
-    values best split the rows into "always missing" and "always filled".
+    E.g. merchant_name is only filled for purchases and bill payments,
+    failure_reason only for failed transactions. For each partly missing
+    column, finds the categorical column whose values (in canonical form,
+    so 'Bill_Payment' counts as 'bill payment') best split the rows into
+    "always missing" and "always filled".
     """
 
     row_count = len(codes)
@@ -1175,7 +1504,7 @@ def conditional_missingness(
         profile["column_name"]
         for profile in columns
         if profile["logical_type"] in ("categorical", "boolean")
-        and profile["unique_count"] <= MISSINGNESS_MAX_CATEGORIES
+        and len(uniques[profile["column_name"]]) <= MISSINGNESS_MAX_CATEGORIES
     ]
 
     results: list[dict[str, Any]] = []
@@ -1194,7 +1523,7 @@ def conditional_missingness(
             if driver == column:
                 continue
 
-            known = codes[driver].notna()
+            known = codes[driver].ge(0)
             stats = (
                 missing[known]
                 .groupby(codes[driver][known])
@@ -1287,9 +1616,13 @@ def profile_file(
     }
 
     columns = []
+    canonical: dict[str, pd.Series] = {}
     for column in df.columns:
         print(f"  column: {column}")
-        columns.append(profile_column(df[column], masks[column]))
+        profile, values = profile_column(df[column], masks[column])
+        columns.append(profile)
+        if relationships:
+            canonical[column] = values
 
     duplicate_rows = int(df.duplicated().sum())
 
@@ -1324,7 +1657,7 @@ def profile_file(
         if (
             column["logical_type"] == "identifier"
             and name not in candidate_keys
-            and column["unique_count"] >= 0.99 * len(df)
+            and column["unique_count"] >= NEAR_KEY_MIN_SHARE * len(df)
         ):
             file_flags.append(make_note(
                 "NEAR_KEY",
@@ -1355,22 +1688,43 @@ def profile_file(
     if relationships and len(df):
         print("  cross-column relationships")
 
-        present = pd.DataFrame({
-            column: df[column].str.strip().where(~masks[column]["missing"])
-            for column in df.columns
-        })
-        codes, uniques = category_codes(present)
-        del present
+        codes, uniques = category_codes(canonical, df.index)
+        del canonical
 
-        entities = entity_attributes(codes, columns)
+        entities, duplicate_keys = key_relationships(codes, uniques, columns)
         missingness = conditional_missingness(codes, uniques, masks, columns)
 
+        for item in duplicate_keys:
+            differing = ", ".join(
+                f"{column} ({count})"
+                for column, count in item["differing_columns"].items()
+            ) or "no column"
+            file_flags.append(make_note(
+                "DUPLICATE_KEYS",
+                f"{item['repeated_key_count']} '{item['key_column']}' values "
+                f"appear on more than one row ({item['row_count']} rows); "
+                f"the rows sharing a value differ in: {differing}.",
+            ))
+
         for entity in entities:
+            key = entity["key_column"]
+
             for column, count in entity["conflicting_key_counts"].items():
                 file_flags.append(make_note(
                     "ENTITY_CONFLICTS",
-                    f"{count} '{entity['key_column']}' values have more "
-                    f"than one '{column}'.",
+                    f"{count} '{key}' values have more than one "
+                    f"'{column}' ({entity['conflicting_row_counts'][column]}"
+                    " rows differ from the key's usual value).",
+                ))
+
+            for column, values in entity["shared_values"].items():
+                file_flags.append(make_note(
+                    "SHARED_VALUES",
+                    f"'{column}' values shared by many '{key}' values: "
+                    + ", ".join(
+                        f"'{item['value']}' ({item['key_count']} keys)"
+                        for item in values[:5]
+                    ) + ".",
                 ))
 
         for item in missingness:
@@ -1382,6 +1736,7 @@ def profile_file(
             ))
 
         result["relationships"] = {
+            "duplicate_keys": duplicate_keys,
             "entity_attributes": entities,
             "conditional_missingness": missingness,
         }
@@ -1439,12 +1794,88 @@ def parse_args() -> argparse.Namespace:
         help="Skip the cross-column checks (entity attributes and "
         "conditional missingness).",
     )
+    parser.add_argument(
+        "--ingestion", default=None,
+        help="Ingestion id (or 'latest') under --raw-root/--dataset-name: "
+        "profiles the ingested copy and writes profile.json next to its "
+        "manifest. Overrides --input and --output.",
+    )
+    parser.add_argument(
+        "--raw-root", type=Path, default=DEFAULT_RAW_ROOT,
+        help="Raw layer root holding <dataset>/<ingestion id>/ folders.",
+    )
 
     return parser.parse_args()
 
 
+def ingestion_folder(raw_root: Path, dataset: str, ingestion_id: str) -> Path:
+    """Folder of an ingestion; 'latest' picks the newest one."""
+
+    dataset_root = raw_root / dataset
+    if ingestion_id == "latest":
+        folders = sorted(
+            folder for folder in dataset_root.glob("ING_*")
+            if (folder / "manifest.json").is_file()
+        )
+        if not folders:
+            raise FileNotFoundError(f"No ingestions under {dataset_root}")
+        return folders[-1]
+
+    folder = dataset_root / ingestion_id
+    if not (folder / "manifest.json").is_file():
+        raise FileNotFoundError(f"No manifest for {ingestion_id} in {dataset_root}")
+    return folder
+
+
+def profile_ingestion(args: argparse.Namespace, null_tokens: frozenset[str]) -> int:
+    """Profile an ingested raw file and register the profile in its manifest."""
+
+    folder = ingestion_folder(args.raw_root, args.dataset_name, args.ingestion)
+    manifest_path = folder / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    stored = folder / manifest["stored_file"]
+
+    # The raw layer is immutable: refuse to profile a changed file.
+    digest = hashlib.sha256()
+    with stored.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    if digest.hexdigest() != manifest["sha256"]:
+        print(f"FAILED: {stored} no longer matches its manifest hash.")
+        return 1
+
+    profile = profile_file(
+        stored,
+        folder,
+        manifest["dataset"],
+        null_tokens,
+        manifest.get("delimiter", args.delimiter),
+        relationships=not args.skip_relationships,
+    )
+    profile["ingestion_id"] = manifest["ingestion_id"]
+
+    output_path = folder / "profile.json"
+    with output_path.open("w", encoding="utf-8") as output_file:
+        json.dump(profile, output_file, indent=2, ensure_ascii=False,
+                  allow_nan=False)
+
+    manifest["profile"] = output_path.name
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8",
+    )
+
+    print(f"Created: {output_path}")
+    return 0
+
+
 def main() -> int:
     args = parse_args()
+
+    if args.ingestion:
+        null_tokens = frozenset(
+            token.strip().casefold() for token in args.null_tokens
+        ) - {""}
+        return profile_ingestion(args, null_tokens)
 
     input_path: Path = args.input.resolve()
     output_dir: Path = args.output

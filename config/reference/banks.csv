@@ -1,0 +1,13 @@
+bank_id,bank_name,bank_type
+BNK01,National Bank of Egypt,public
+BNK02,Banque Misr,public
+BNK03,Commercial International Bank,private
+BNK04,Banque du Caire,public
+BNK05,QNB Egypt,private
+BNK06,Alex Bank,private
+BNK07,Arab African International Bank,private
+BNK08,HSBC Egypt,private
+BNK09,Faisal Islamic Bank of Egypt,private
+BNK10,Abu Dhabi Islamic Bank Egypt,private
+BNK11,Credit Agricole Egypt,private
+BNK12,Housing and Development Bank,public

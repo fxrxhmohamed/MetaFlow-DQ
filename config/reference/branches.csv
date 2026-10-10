@@ -1,0 +1,181 @@
+branch_id,branch_name,bank_id,branch_city,branch_governorate,branch_region
+BR001,BM - Cairo Main,BNK02,Cairo,Cairo,Greater Cairo
+BR002,QNB - New Cairo Main,BNK05,New Cairo,Cairo,Greater Cairo
+BR003,NBE - Giza Main,BNK01,Giza,Giza,Greater Cairo
+BR004,BM - 6th of October City Main,BNK02,6th of October City,Giza,Greater Cairo
+BR005,NBE - Shubra El Kheima Main,BNK01,Shubra El Kheima,Qalyubia,Greater Cairo
+BR006,CIB - Banha Main,BNK03,Banha,Qalyubia,Delta
+BR007,BM - Alexandria Main,BNK02,Alexandria,Alexandria,Alexandria & North Coast
+BR008,QNB - Marsa Matruh Main,BNK05,Marsa Matruh,Matrouh,Alexandria & North Coast
+BR009,HSBC - Damanhur Main,BNK08,Damanhur,Beheira,Delta
+BR010,QNB - Tanta Main,BNK05,Tanta,Gharbia,Delta
+BR011,BM - El Mahalla El Kubra Main,BNK02,El Mahalla El Kubra,Gharbia,Delta
+BR012,NBE - Mansoura Main,BNK01,Mansoura,Dakahlia,Delta
+BR013,NBE - Zagazig Main,BNK01,Zagazig,Sharqia,Delta
+BR014,NBE - Shibin El Kom Main,BNK01,Shibin El Kom,Monufia,Delta
+BR015,ALEX - Kafr El Sheikh Main,BNK06,Kafr El Sheikh,Kafr El Sheikh,Delta
+BR016,ALEX - Damietta Main,BNK06,Damietta,Damietta,Delta
+BR017,AAIB - Port Said Main,BNK07,Port Said,Port Said,Canal
+BR018,NBE - Ismailia Main,BNK01,Ismailia,Ismailia,Canal
+BR019,ADIB - Suez Main,BNK10,Suez,Suez,Canal
+BR020,NBE - Fayoum Main,BNK01,Fayoum,Fayoum,Upper Egypt
+BR021,BDC - Beni Suef Main,BNK04,Beni Suef,Beni Suef,Upper Egypt
+BR022,CIB - Minya Main,BNK03,Minya,Minya,Upper Egypt
+BR023,BM - Assiut Main,BNK02,Assiut,Assiut,Upper Egypt
+BR024,HSBC - Sohag Main,BNK08,Sohag,Sohag,Upper Egypt
+BR025,BM - Qena Main,BNK02,Qena,Qena,Upper Egypt
+BR026,NBE - Luxor Main,BNK01,Luxor,Luxor,Upper Egypt
+BR027,BDC - Aswan Main,BNK04,Aswan,Aswan,Upper Egypt
+BR028,ADIB - Hurghada Main,BNK10,Hurghada,Red Sea,Red Sea & Sinai
+BR029,HDB - Sharm El Sheikh Main,BNK12,Sharm El Sheikh,South Sinai,Red Sea & Sinai
+BR030,NBE - Cairo Main,BNK01,Cairo,Cairo,Greater Cairo
+BR031,BM - Tanta Main,BNK02,Tanta,Gharbia,Delta
+BR032,CIB - Giza Main,BNK03,Giza,Giza,Greater Cairo
+BR033,CIB - Giza Downtown,BNK03,Giza,Giza,Greater Cairo
+BR034,FIBE - Alexandria Main,BNK09,Alexandria,Alexandria,Alexandria & North Coast
+BR035,NBE - Banha Main,BNK01,Banha,Qalyubia,Delta
+BR036,BM - Minya Main,BNK02,Minya,Minya,Upper Egypt
+BR037,NBE - Cairo Downtown,BNK01,Cairo,Cairo,Greater Cairo
+BR038,HSBC - Sohag Downtown,BNK08,Sohag,Sohag,Upper Egypt
+BR039,NBE - Cairo El Gomhoria St.,BNK01,Cairo,Cairo,Greater Cairo
+BR040,BDC - Cairo Main,BNK04,Cairo,Cairo,Greater Cairo
+BR041,QNB - Cairo Main,BNK05,Cairo,Cairo,Greater Cairo
+BR042,NBE - Assiut Main,BNK01,Assiut,Assiut,Upper Egypt
+BR043,NBE - Cairo El Tahrir Sq.,BNK01,Cairo,Cairo,Greater Cairo
+BR044,NBE - Sohag Main,BNK01,Sohag,Sohag,Upper Egypt
+BR045,NBE - Shubra El Kheima Downtown,BNK01,Shubra El Kheima,Qalyubia,Greater Cairo
+BR046,ALEX - Damanhur Main,BNK06,Damanhur,Beheira,Delta
+BR047,QNB - El Mahalla El Kubra Main,BNK05,El Mahalla El Kubra,Gharbia,Delta
+BR048,BM - Alexandria Downtown,BNK02,Alexandria,Alexandria,Alexandria & North Coast
+BR049,QNB - Ismailia Main,BNK05,Ismailia,Ismailia,Canal
+BR050,QNB - Port Said Main,BNK05,Port Said,Port Said,Canal
+BR051,CAE - Damanhur Main,BNK11,Damanhur,Beheira,Delta
+BR052,BM - Fayoum Main,BNK02,Fayoum,Fayoum,Upper Egypt
+BR053,BDC - Cairo Downtown,BNK04,Cairo,Cairo,Greater Cairo
+BR054,ADIB - Zagazig Main,BNK10,Zagazig,Sharqia,Delta
+BR055,FIBE - Luxor Main,BNK09,Luxor,Luxor,Upper Egypt
+BR056,NBE - Cairo Corniche,BNK01,Cairo,Cairo,Greater Cairo
+BR057,ADIB - Cairo Main,BNK10,Cairo,Cairo,Greater Cairo
+BR058,BM - Port Said Main,BNK02,Port Said,Port Said,Canal
+BR059,BM - 6th of October City Downtown,BNK02,6th of October City,Giza,Greater Cairo
+BR060,FIBE - Giza Main,BNK09,Giza,Giza,Greater Cairo
+BR061,ALEX - Zagazig Main,BNK06,Zagazig,Sharqia,Delta
+BR062,HSBC - Beni Suef Main,BNK08,Beni Suef,Beni Suef,Upper Egypt
+BR063,BM - Cairo Downtown,BNK02,Cairo,Cairo,Greater Cairo
+BR064,CIB - Fayoum Main,BNK03,Fayoum,Fayoum,Upper Egypt
+BR065,NBE - Assiut Downtown,BNK01,Assiut,Assiut,Upper Egypt
+BR066,ALEX - Giza Main,BNK06,Giza,Giza,Greater Cairo
+BR067,BM - Qena Downtown,BNK02,Qena,Qena,Upper Egypt
+BR068,AAIB - Qena Main,BNK07,Qena,Qena,Upper Egypt
+BR069,NBE - Cairo Club,BNK01,Cairo,Cairo,Greater Cairo
+BR070,BM - Giza Main,BNK02,Giza,Giza,Greater Cairo
+BR071,CIB - Alexandria Main,BNK03,Alexandria,Alexandria,Alexandria & North Coast
+BR072,NBE - El Mahalla El Kubra Main,BNK01,El Mahalla El Kubra,Gharbia,Delta
+BR073,CIB - Assiut Main,BNK03,Assiut,Assiut,Upper Egypt
+BR074,CIB - Shubra El Kheima Main,BNK03,Shubra El Kheima,Qalyubia,Greater Cairo
+BR075,QNB - Alexandria Main,BNK05,Alexandria,Alexandria,Alexandria & North Coast
+BR076,BM - Qena El Gomhoria St.,BNK02,Qena,Qena,Upper Egypt
+BR077,AAIB - Damanhur Main,BNK07,Damanhur,Beheira,Delta
+BR078,BDC - Assiut Main,BNK04,Assiut,Assiut,Upper Egypt
+BR079,BM - Mansoura Main,BNK02,Mansoura,Dakahlia,Delta
+BR080,NBE - Beni Suef Main,BNK01,Beni Suef,Beni Suef,Upper Egypt
+BR081,NBE - Cairo El Geish St.,BNK01,Cairo,Cairo,Greater Cairo
+BR082,AAIB - Giza Main,BNK07,Giza,Giza,Greater Cairo
+BR083,NBE - Shubra El Kheima El Gomhoria St.,BNK01,Shubra El Kheima,Qalyubia,Greater Cairo
+BR084,NBE - Cairo Station,BNK01,Cairo,Cairo,Greater Cairo
+BR085,ADIB - Zagazig Downtown,BNK10,Zagazig,Sharqia,Delta
+BR086,ADIB - Cairo Downtown,BNK10,Cairo,Cairo,Greater Cairo
+BR087,BDC - Alexandria Main,BNK04,Alexandria,Alexandria,Alexandria & North Coast
+BR088,HSBC - Damanhur Downtown,BNK08,Damanhur,Beheira,Delta
+BR089,QNB - Cairo Downtown,BNK05,Cairo,Cairo,Greater Cairo
+BR090,ADIB - Giza Main,BNK10,Giza,Giza,Greater Cairo
+BR091,AAIB - Shibin El Kom Main,BNK07,Shibin El Kom,Monufia,Delta
+BR092,ADIB - Shubra El Kheima Main,BNK10,Shubra El Kheima,Qalyubia,Greater Cairo
+BR093,AAIB - Banha Main,BNK07,Banha,Qalyubia,Delta
+BR094,NBE - Giza Downtown,BNK01,Giza,Giza,Greater Cairo
+BR095,HDB - Qena Main,BNK12,Qena,Qena,Upper Egypt
+BR096,BM - 6th of October City El Gomhoria St.,BNK02,6th of October City,Giza,Greater Cairo
+BR097,NBE - Alexandria Main,BNK01,Alexandria,Alexandria,Alexandria & North Coast
+BR098,BM - Damanhur Main,BNK02,Damanhur,Beheira,Delta
+BR099,QNB - Cairo El Gomhoria St.,BNK05,Cairo,Cairo,Greater Cairo
+BR100,ALEX - Cairo Main,BNK06,Cairo,Cairo,Greater Cairo
+BR101,ADIB - Alexandria Main,BNK10,Alexandria,Alexandria,Alexandria & North Coast
+BR102,HDB - Cairo Main,BNK12,Cairo,Cairo,Greater Cairo
+BR103,CIB - Alexandria Downtown,BNK03,Alexandria,Alexandria,Alexandria & North Coast
+BR104,ADIB - 6th of October City Main,BNK10,6th of October City,Giza,Greater Cairo
+BR105,CIB - Cairo Main,BNK03,Cairo,Cairo,Greater Cairo
+BR106,NBE - Shibin El Kom Downtown,BNK01,Shibin El Kom,Monufia,Delta
+BR107,BM - Cairo El Gomhoria St.,BNK02,Cairo,Cairo,Greater Cairo
+BR108,NBE - Shubra El Kheima El Tahrir Sq.,BNK01,Shubra El Kheima,Qalyubia,Greater Cairo
+BR109,CIB - Shubra El Kheima Downtown,BNK03,Shubra El Kheima,Qalyubia,Greater Cairo
+BR110,NBE - Giza El Gomhoria St.,BNK01,Giza,Giza,Greater Cairo
+BR111,BDC - Banha Main,BNK04,Banha,Qalyubia,Delta
+BR112,BDC - Damietta Main,BNK04,Damietta,Damietta,Delta
+BR113,QNB - Cairo El Tahrir Sq.,BNK05,Cairo,Cairo,Greater Cairo
+BR114,QNB - Suez Main,BNK05,Suez,Suez,Canal
+BR115,CIB - New Cairo Main,BNK03,New Cairo,Cairo,Greater Cairo
+BR116,CIB - Damietta Main,BNK03,Damietta,Damietta,Delta
+BR117,CIB - Beni Suef Main,BNK03,Beni Suef,Beni Suef,Upper Egypt
+BR118,BDC - Giza Main,BNK04,Giza,Giza,Greater Cairo
+BR119,CIB - Giza El Gomhoria St.,BNK03,Giza,Giza,Greater Cairo
+BR120,BDC - Beni Suef Downtown,BNK04,Beni Suef,Beni Suef,Upper Egypt
+BR121,AAIB - Giza Downtown,BNK07,Giza,Giza,Greater Cairo
+BR122,NBE - Damanhur Main,BNK01,Damanhur,Beheira,Delta
+BR123,BM - Sharm El Sheikh Main,BNK02,Sharm El Sheikh,South Sinai,Red Sea & Sinai
+BR124,CIB - Cairo Downtown,BNK03,Cairo,Cairo,Greater Cairo
+BR125,BM - Alexandria El Gomhoria St.,BNK02,Alexandria,Alexandria,Alexandria & North Coast
+BR126,CIB - Cairo El Gomhoria St.,BNK03,Cairo,Cairo,Greater Cairo
+BR127,BDC - Giza Downtown,BNK04,Giza,Giza,Greater Cairo
+BR128,CIB - 6th of October City Main,BNK03,6th of October City,Giza,Greater Cairo
+BR129,AAIB - Giza El Gomhoria St.,BNK07,Giza,Giza,Greater Cairo
+BR130,BDC - Banha Downtown,BNK04,Banha,Qalyubia,Delta
+BR131,NBE - Qena Main,BNK01,Qena,Qena,Upper Egypt
+BR132,QNB - Banha Main,BNK05,Banha,Qalyubia,Delta
+BR133,HSBC - Damanhur El Gomhoria St.,BNK08,Damanhur,Beheira,Delta
+BR134,BM - Mansoura Downtown,BNK02,Mansoura,Dakahlia,Delta
+BR135,ALEX - Qena Main,BNK06,Qena,Qena,Upper Egypt
+BR136,CIB - El Mahalla El Kubra Main,BNK03,El Mahalla El Kubra,Gharbia,Delta
+BR137,QNB - Giza Main,BNK05,Giza,Giza,Greater Cairo
+BR138,NBE - Qena Downtown,BNK01,Qena,Qena,Upper Egypt
+BR139,CIB - Shibin El Kom Main,BNK03,Shibin El Kom,Monufia,Delta
+BR140,CIB - Banha Downtown,BNK03,Banha,Qalyubia,Delta
+BR141,AAIB - Tanta Main,BNK07,Tanta,Gharbia,Delta
+BR142,BM - Aswan Main,BNK02,Aswan,Aswan,Upper Egypt
+BR143,HDB - Cairo Downtown,BNK12,Cairo,Cairo,Greater Cairo
+BR144,HDB - Cairo El Gomhoria St.,BNK12,Cairo,Cairo,Greater Cairo
+BR145,NBE - Assiut El Gomhoria St.,BNK01,Assiut,Assiut,Upper Egypt
+BR146,BDC - Minya Main,BNK04,Minya,Minya,Upper Egypt
+BR147,BM - Alexandria El Tahrir Sq.,BNK02,Alexandria,Alexandria,Alexandria & North Coast
+BR148,BDC - Cairo El Gomhoria St.,BNK04,Cairo,Cairo,Greater Cairo
+BR149,QNB - Ismailia Downtown,BNK05,Ismailia,Ismailia,Canal
+BR150,FIBE - Sohag Main,BNK09,Sohag,Sohag,Upper Egypt
+BR151,QNB - Damanhur Main,BNK05,Damanhur,Beheira,Delta
+BR152,BDC - Damanhur Main,BNK04,Damanhur,Beheira,Delta
+BR153,NBE - Cairo Branch 9,BNK01,Cairo,Cairo,Greater Cairo
+BR154,HSBC - Alexandria Main,BNK08,Alexandria,Alexandria,Alexandria & North Coast
+BR155,ALEX - Sohag Main,BNK06,Sohag,Sohag,Upper Egypt
+BR156,BM - Giza Downtown,BNK02,Giza,Giza,Greater Cairo
+BR157,HDB - New Cairo Main,BNK12,New Cairo,Cairo,Greater Cairo
+BR158,NBE - Cairo Branch 10,BNK01,Cairo,Cairo,Greater Cairo
+BR159,ALEX - Zagazig Downtown,BNK06,Zagazig,Sharqia,Delta
+BR160,AAIB - Cairo Main,BNK07,Cairo,Cairo,Greater Cairo
+BR161,BDC - Cairo El Tahrir Sq.,BNK04,Cairo,Cairo,Greater Cairo
+BR162,BDC - Mansoura Main,BNK04,Mansoura,Dakahlia,Delta
+BR163,QNB - Giza Downtown,BNK05,Giza,Giza,Greater Cairo
+BR164,HDB - Cairo El Tahrir Sq.,BNK12,Cairo,Cairo,Greater Cairo
+BR165,AAIB - Giza El Tahrir Sq.,BNK07,Giza,Giza,Greater Cairo
+BR166,NBE - Giza El Tahrir Sq.,BNK01,Giza,Giza,Greater Cairo
+BR167,BM - Giza El Gomhoria St.,BNK02,Giza,Giza,Greater Cairo
+BR168,QNB - Zagazig Main,BNK05,Zagazig,Sharqia,Delta
+BR169,ALEX - Damietta Downtown,BNK06,Damietta,Damietta,Delta
+BR170,BDC - Assiut Downtown,BNK04,Assiut,Assiut,Upper Egypt
+BR171,NBE - Alexandria Downtown,BNK01,Alexandria,Alexandria,Alexandria & North Coast
+BR172,NBE - Assiut El Tahrir Sq.,BNK01,Assiut,Assiut,Upper Egypt
+BR173,NBE - Marsa Matruh Main,BNK01,Marsa Matruh,Matrouh,Alexandria & North Coast
+BR174,NBE - Minya Main,BNK01,Minya,Minya,Upper Egypt
+BR175,NBE - Tanta Main,BNK01,Tanta,Gharbia,Delta
+BR176,ADIB - El Mahalla El Kubra Main,BNK10,El Mahalla El Kubra,Gharbia,Delta
+BR177,BM - Cairo El Tahrir Sq.,BNK02,Cairo,Cairo,Greater Cairo
+BR178,QNB - New Cairo Downtown,BNK05,New Cairo,Cairo,Greater Cairo
+BR179,CIB - New Cairo Downtown,BNK03,New Cairo,Cairo,Greater Cairo
+BR180,NBE - Damietta Main,BNK01,Damietta,Damietta,Delta

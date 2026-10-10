@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
-from values import as_flags, resolve_bound
+from values import as_flags, format_number, resolve_bound
 
 if TYPE_CHECKING:
     from dq_engine import Batch
@@ -126,9 +126,19 @@ def detect(batch: Batch, rule: Rule, scope: pd.Series) -> pd.Series:
         matches = as_flags(values.str.fullmatch(rule.params["pattern"]))
         failing = values.notna() & ~matches
 
-    elif kind == "allowed_values":
+    elif kind in ("allowed_values", "reference"):
+        # reference: values loaded from the lookup file at config load.
         allowed = [str(v) for v in rule.params["values"]]
         failing = values.notna() & ~as_flags(values.isin(allowed))
+
+    elif kind == "expression":
+        # e.g. 'abs(amount_egp - transaction_amount) <= 0.01'; rows with a
+        # missing input are not judged.
+        frame = pd.DataFrame({c: batch.typed(c) for c in rule.columns})
+        holds = frame.eval(rule.params["expression"], engine="python")
+        failing = frame.notna().all(axis=1) & ~as_flags(
+            pd.Series(holds, index=frame.index).astype("boolean")
+        )
 
     elif kind == "range":
         failing = _range_failures(
@@ -169,6 +179,43 @@ def derived_values(batch: Batch, rule: Rule) -> pd.Series:
 
     source = batch.typed(rule.params["source"])
     return source.dt.strftime(rule.params["format"]).astype("string")
+
+
+def generated_values(batch: Batch, rule: Rule) -> pd.Series:
+    """Values of a generated column, computed from cleaned columns.
+
+    convert_currency  amount x rate of its currency, e.g. 1000 USD at
+                      52.40 -> '52400'
+    case              value of the first case whose condition matches,
+                      else the default (NA without one)
+
+    NA where the value cannot be computed (unknown currency, no match).
+    """
+
+    method = rule.params["method"]
+
+    if method == "convert_currency":
+        amount = batch.typed(rule.params["amount"])
+        rates = {
+            str(code): float(rate)
+            for code, rate in rule.params["rates"].items()
+        }
+        rate = batch.data[rule.params["currency"]].map(rates)
+        converted = (
+            amount * pd.to_numeric(rate.astype(object), errors="coerce")
+        ).round(int(rule.params.get("decimals", 2)))
+        return converted.map(format_number, na_action="ignore").astype("string")
+
+    if method == "case":
+        result = pd.Series(pd.NA, index=batch.data.index, dtype="string")
+        for case in rule.params["cases"]:
+            hit = result.isna() & condition_mask(batch, case.get("when"))
+            result[hit] = str(case["value"])
+        if "default" in rule.params:
+            result = result.fillna(str(rule.params["default"]))
+        return result
+
+    raise ValueError(f"Rule {rule.id}: unknown generate method {method}")
 
 
 # ============================================================

@@ -1,5 +1,5 @@
 # ==============================================================
-# Schema registry: Egypt banking channel adoption transactions
+# Schema registry: Egypt banking transactions
 # ==============================================================
 #
 # The intended shape of the data: one entry per source column with its
@@ -19,13 +19,24 @@
 #   nullable        true | false | conditional (rules decide when)
 #   pattern         regular expression the whole value must match
 #   allowed_values  closed list of valid values (exact spelling)
-#   min / max       inclusive bounds; "today" means the run date
+#   reference       {path, column}: the value must exist in that column of
+#                   a lookup file (path relative to the project root)
+#   min / max       inclusive bounds; "today" means the run date and
+#                   "today-18y" / "today+30d" are relative to it
 #   exclusive_min   true when the value must be strictly above min
 #   unique          true when no two rows may share the value
 #   pii             true for personal data (masked in dashboards)
+#   generated       true for columns the engine computes (generate rules
+#                   in the rules file); the raw file need not have them
 #
 # Values were taken from the profile of
-# data/raw/banking/egypt_banking_channel_adoption_raw.csv (1,013,000 rows).
+# data/raw/banking/banking_transactions.csv (1,100,000 rows, 49 columns),
+# written by services/metadata-service/src/profiler.py to
+# data/profiling/banking_transactions_profile.json. Allowed values use the
+# most common spelling of each category; case, spacing and underscore
+# variants ('MOBILE APP', 'Mobile_App') are left out so they are
+# canonicalised. 'Other' is a valid value only for channel, merchant_name,
+# merchant_category and failure_reason.
 
 version: 1
 
@@ -36,11 +47,13 @@ dataset:
     customers, 2022-01 to 2025-12, one row per transaction with the
     customer, account, bank and branch attributes repeated on each row.
   source:
-    path: data/raw/banking/egypt_banking_channel_adoption_raw.csv
+    path: data/raw/banking/banking_transactions.csv
     format: csv
     delimiter: ","
     encoding: utf-8-sig
   grain: one row per transaction
+  # 3,300 transaction_id values appear twice in the raw file; the pairs
+  # differ in transaction_amount and customer_first_name.
   primary_key: [transaction_id]
   # Text that means "no value" (compared after trim, case-insensitive).
   null_tokens: ["", "null", "none", "nan", "n/a", "na", "#n/a", "nil", "-", "--", "?"]
@@ -59,6 +72,7 @@ reference_lists:
   digital_channels: &digital_channels [InstaPay, Internet Banking, Mobile App]
   assisted_channels: &assisted_channels [ATM, Branch, Call Center, POS, System]
 
+  # The 27 governorates of Egypt.
   governorates: &governorates
     - Alexandria
     - Assiut
@@ -77,6 +91,8 @@ reference_lists:
     - Matrouh
     - Minya
     - Monufia
+    - New Valley
+    - North Sinai
     - Port Said
     - Qalyubia
     - Qena
@@ -151,6 +167,7 @@ entities:
       - date_of_birth
       - marital_status
       - email
+      - country_code
       - phone_number
       - customer_city
       - customer_governorate
@@ -159,7 +176,6 @@ entities:
       - annual_income
       - credit_score
       - customer_since_date
-      - customer_digital_propensity
 
   bank:
     key: bank_id
@@ -190,7 +206,7 @@ dependencies:
 
 
 # --------------------------------------------------------------
-# Columns (52, in source order)
+# Columns (49 from the source, in source order, plus 3 generated)
 # --------------------------------------------------------------
 
 columns:
@@ -211,7 +227,9 @@ columns:
     role: timestamp
     entity: transaction
     description: Business date of the transaction.
-    source_format: "%m/%d/%Y"
+    # 98% ISO; the rest are 27-09-2022, 14/08/2025 (day first),
+    # 2024/05/01 and 07 Sep 2023.
+    source_format: "%Y-%m-%d"
     nullable: false
     min: "2022-01-01"
     max: today
@@ -221,6 +239,7 @@ columns:
     role: timestamp
     entity: transaction
     description: Local time of the transaction (24-hour clock).
+    # 1.5% are written on a 12-hour clock (07:19:20 PM).
     source_format: "%H:%M:%S"
     nullable: false
 
@@ -258,17 +277,26 @@ columns:
     description: ISO 4217 code of the transaction currency.
     nullable: false
     pattern: '^[A-Z]{3}$'
-    allowed_values: [EGP, USD, EUR, SAR, AED]
+    allowed_values: [AED, EGP, EUR, SAR, USD]
+
+  amount_egp:
+    type: decimal
+    role: derived
+    entity: transaction
+    description: transaction_amount converted to EGP with the rate of its currency (rates in the rules file).
+    unit: EGP
+    generated: true
+    nullable: conditional
+    derived_from: [transaction_amount, currency]
 
   transaction_fee:
     type: decimal
     role: measure
     entity: transaction
-    description: Fee charged on the transaction.
+    description: Fee charged on the transaction; only transfers and withdrawals carry one.
     unit: currency
     nullable: false
     min: 0
-    max: 100
 
   balance_after_transaction:
     type: decimal
@@ -295,13 +323,14 @@ columns:
     entity: transaction
     description: Channel through which the transaction was made.
     nullable: false
-    allowed_values: [ATM, Branch, Call Center, InstaPay, Internet Banking, Mobile App, POS, System]
+    # Other: a channel outside the known list.
+    allowed_values: [ATM, Branch, Call Center, InstaPay, Internet Banking, Mobile App, Other, POS, System]
 
   card_type:
     type: string
     role: category
     entity: transaction
-    description: Card used; only for card-based transactions.
+    description: Card used; always at ATMs, never at branches, call centers, InstaPay or System.
     nullable: conditional
     allowed_values: [Mastercard Credit, Mastercard Debit, Meeza, Visa Credit, Visa Debit]
 
@@ -311,6 +340,7 @@ columns:
     entity: transaction
     description: Merchant or biller; only for purchases and bill payments.
     nullable: conditional
+    # Other: a merchant outside the known list.
     allowed_values:
       - 2B Egypt
       - Abou El Sid
@@ -341,6 +371,7 @@ columns:
       - Misr Petroleum
       - Noon Egypt
       - Orange Egypt
+      - Other
       - Raya Shop
       - Seif Pharmacies
       - Seoudi Market
@@ -364,6 +395,7 @@ columns:
     entity: transaction
     description: Merchant category; follows merchant_name.
     nullable: conditional
+    # Other: a category outside the known list.
     allowed_values:
       - Electronics
       - Entertainment
@@ -372,6 +404,7 @@ columns:
       - Groceries
       - Healthcare
       - Online Shopping
+      - Other
       - Restaurants
       - Travel
       - Utilities & Telecom
@@ -380,30 +413,17 @@ columns:
     type: string
     role: category
     entity: transaction
-    description: Channel feature or service used.
+    description: Kind of channel; Digital/Self-Service for InstaPay, Internet Banking and Mobile App.
     nullable: false
-    allowed_values:
-      - Account Opening
-      - Account Service
-      - Balance Inquiry
-      - Beneficiary Management
-      - Bill Payment
-      - Card Controls
-      - Card Purchase
-      - Card Support
-      - Cash Deposit
-      - Cash Withdrawal
-      - Statements
-      - System Processing
-      - Transfers
+    allowed_values: [Assisted/Physical, Digital/Self-Service]
 
   digital_feature_use:
     type: string
     role: category
     entity: transaction
-    description: How the channel was used.
+    description: Digital feature used; Funds Transfer on digital channels, otherwise Not Applicable.
     nullable: false
-    allowed_values: [Assisted/Physical, Core Transaction, Feature Used]
+    allowed_values: [Funds Transfer, Not Applicable]
 
   login_success:
     type: boolean
@@ -418,12 +438,12 @@ columns:
     type: decimal
     role: measure
     entity: transaction
-    description: Digital session length in seconds; digital channels only.
+    description: Session length in seconds; filled for every channel.
     unit: seconds
-    nullable: conditional
+    nullable: false
     min: 0
     exclusive_min: true
-    max: 3600
+    max: 1800
 
   attempt_count:
     type: integer
@@ -432,32 +452,26 @@ columns:
     description: Number of attempts before the final status.
     nullable: false
     min: 1
-    max: 3
+    max: 4
 
   failure_reason:
     type: string
     role: category
     entity: transaction
-    description: Why the transaction failed; only for failed or pending transactions.
+    description: Why the transaction failed; only for failed transactions.
     nullable: conditional
-    allowed_values:
-      - Authentication Failure
-      - Customer Cancelled
-      - Insufficient Funds
-      - Limit Exceeded
-      - Network Timeout
-      - System Unavailable
+    # Other: a reason outside the known list.
+    allowed_values: [Authentication Failed, Insufficient Funds, Network Timeout, Other]
 
   estimated_channel_cost_egp:
     type: decimal
     role: measure
     entity: transaction
-    description: Estimated cost to the bank of serving the transaction through its channel.
+    description: Estimated cost to the bank of serving the transaction through its channel (digital up to 2, assisted up to 30).
     unit: EGP
     nullable: false
+    # 0.00 occurs on every channel (rounding of small costs).
     min: 0
-    exclusive_min: true
-    max: 50
 
   digital_channel_flag:
     type: boolean
@@ -470,30 +484,17 @@ columns:
 
   digital_migration_opportunity:
     type: boolean
-    role: flag
-    entity: transaction
-    description: 1 when an assisted transaction could have been done digitally.
-    nullable: false
-    true_values: ["1"]
-    false_values: ["0"]
-
-  customer_digital_propensity:
-    type: decimal
-    role: measure
-    entity: customer
-    description: Model score (0-1) of the customer's likelihood to use digital channels.
-    nullable: false
-    min: 0
-    max: 1
-
-  month:
-    type: year_month
     role: derived
     entity: transaction
-    description: Year and month of transaction_date.
-    source_format: "%Y-%m"
-    nullable: false
-    derived_from: transaction_date
+    description: >
+      1 when a transaction made on an assisted (non-digital) channel could
+      have been made digitally; never 1 on a digital channel. Set by the
+      engine from channel and transaction_type (rule in the rules file).
+    generated: true
+    nullable: conditional
+    derived_from: [channel, transaction_type]
+    true_values: ["1"]
+    false_values: ["0"]
 
   # ---------------- Account ----------------
 
@@ -518,7 +519,7 @@ columns:
     role: attribute
     entity: account
     description: Date the account was opened.
-    source_format: "%m/%d/%Y"
+    source_format: "%Y-%m-%d"
     nullable: false
     min: "1990-01-01"
     max: today
@@ -539,7 +540,7 @@ columns:
     unit: percent
     nullable: false
     min: 0
-    max: 50
+    max: 100
 
   # ---------------- Customer ----------------
 
@@ -558,7 +559,8 @@ columns:
     description: Given name.
     nullable: false
     pii: true
-    pattern: "^[A-Za-z][A-Za-z' -]*$"
+    # Letters, with single spaces, hyphens or apostrophes between parts.
+    pattern: "^[A-Za-z]+(?:[ '-][A-Za-z]+)*$"
 
   customer_last_name:
     type: string
@@ -567,7 +569,8 @@ columns:
     description: Family name.
     nullable: false
     pii: true
-    pattern: "^[A-Za-z][A-Za-z' -]*$"
+    # Letters, with single spaces, hyphens or apostrophes between parts.
+    pattern: "^[A-Za-z]+(?:[ '-][A-Za-z]+)*$"
 
   gender:
     type: string
@@ -581,12 +584,12 @@ columns:
     type: date
     role: attribute
     entity: customer
-    description: Date of birth.
-    source_format: "%m/%d/%Y"
+    description: Date of birth; customers are at least 18 years old.
+    source_format: "%Y-%m-%d"
     nullable: false
     pii: true
     min: "1900-01-01"
-    max: today
+    max: today-18y
 
   marital_status:
     type: string
@@ -603,16 +606,30 @@ columns:
     description: Contact email address.
     nullable: false
     pii: true
-    pattern: '^[^@\s]+@[^@\s]+\.[^@\s]+$'
+    # Starts with a letter, exactly one @, ends with .com. Placeholders
+    # 'invalid-email' and 'name@@example.com' fail it.
+    pattern: '^[A-Za-z][A-Za-z0-9._%+-]*@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.com$'
+
+  country_code:
+    type: string
+    role: derived
+    entity: customer
+    description: ISO 3166 country of the customer (EG when customer_governorate is an Egyptian governorate); decides how phone_number is validated.
+    generated: true
+    nullable: conditional
+    derived_from: [customer_governorate]
+    allowed_values: [EG]
 
   phone_number:
     type: string
     role: attribute
     entity: customer
-    description: Egyptian mobile number without the leading 0 or +20 (e.g. 1012345678).
+    description: Mobile number; for country_code EG 11 digits with the leading 0 (e.g. 01012345678).
     nullable: false
     pii: true
-    pattern: '^1[0125]\d{8}$'
+    # Placeholders 'abc#123', '010-1234-5678' and '+201012345678' are each
+    # shared by about 3,400 customers and fail this pattern.
+    pattern: '^01[0125]\d{8}$'
 
   customer_city:
     type: string
@@ -680,7 +697,8 @@ columns:
     entity: customer
     description: Credit bureau score.
     nullable: false
-    min: 300
+    # Can be 0 (5,517 rows, no score yet); real scores start at 408.
+    min: 0
     max: 850
 
   customer_since_date:
@@ -688,7 +706,7 @@ columns:
     role: attribute
     entity: customer
     description: Date the customer relationship started.
-    source_format: "%m/%d/%Y"
+    source_format: "%Y-%m-%d"
     nullable: false
     min: "1990-01-01"
     max: today
@@ -702,6 +720,7 @@ columns:
     description: Bank reference.
     nullable: false
     pattern: '^BNK\d{2}$'
+    reference: {path: config/reference/banks.csv, column: bank_id}
 
   bank_name:
     type: string
@@ -727,9 +746,9 @@ columns:
     type: string
     role: category
     entity: bank
-    description: Ownership model of the bank.
+    description: Ownership model of the bank; Islamic banks are recorded as private.
     nullable: false
-    allowed_values: [Islamic, Private, Public]
+    allowed_values: [private, public]
 
   branch_id:
     type: string
@@ -738,14 +757,16 @@ columns:
     description: Branch reference.
     nullable: false
     pattern: '^BR\d{3}$'
+    reference: {path: config/reference/branches.csv, column: branch_id}
 
   branch_name:
     type: string
     role: attribute
     entity: branch
-    description: Branch name ("<bank abbreviation> - <location>").
+    description: Branch name ("<bank abbreviation> - <location>"); one per branch_id.
     nullable: false
-    pattern: '^[A-Z]+ - .+$'
+    # The 180 branches, one per branch_id.
+    reference: {path: config/reference/branches.csv, column: branch_name}
 
   branch_city:
     type: string

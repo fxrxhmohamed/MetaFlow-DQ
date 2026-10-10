@@ -7,6 +7,7 @@ errors are reported up front, before any data is read.
 
 from __future__ import annotations
 
+import csv
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -14,7 +15,7 @@ from typing import Any
 import yaml
 
 
-SCHEMA_VALUE_CHECKS = ("type", "pattern", "allowed_values", "range")
+SCHEMA_VALUE_CHECKS = ("type", "pattern", "allowed_values", "reference", "range")
 SCHEMA_FINAL_CHECKS = ("not_null", "unique")
 
 COLUMN_TYPES = {
@@ -24,12 +25,15 @@ COLUMN_TYPES = {
 RULE_TYPES = {
     "not_null", "is_null", "allowed_values", "pattern", "range", "type",
     "unique", "compare", "derived", "functional_dependency",
-    "duplicate_rows", "trim_whitespace", "null_tokens",
+    "duplicate_rows", "trim_whitespace", "null_tokens", "generate",
+    "reference", "expression",
 }
+
+GENERATE_METHODS = {"convert_currency", "case"}
 
 REMEDIATION_ACTIONS = {
     "trim", "set_null", "canonicalize", "parse_number", "parse_date",
-    "parse_time", "reformat_id", "derive", "swap_day_month",
+    "parse_time", "reformat_id", "replace", "derive", "swap_day_month",
     "drop_duplicates",
 }
 
@@ -38,7 +42,37 @@ COMPARE_OPERATORS = {">=", ">", "<=", "<", "==", "!="}
 # Keys that are not rule parameters.
 RULE_KEYS = {
     "id", "name", "type", "column", "columns", "dimension", "severity",
-    "when", "remediation", "on_accept", "enabled",
+    "when", "remediation", "on_accept", "enabled", "error_code", "message",
+}
+
+# Error code, category and message template per rule type, used in the
+# quarantine error list. A rule can override code and message.
+# Placeholders: {column} {value} {column_type} {bounds} {left} {operator}
+# {right} {source} {reference} {determinant} {name}.
+ERROR_TYPES: dict[str, tuple[str, str, str]] = {
+    "not_null": ("DQ-NULL", "null", "{column} is missing"),
+    "is_null": ("DQ-BUS", "business_rule",
+                "{column} should be empty here but is '{value}'"),
+    "type": ("DQ-TYPE", "type_mismatch",
+             "{column} '{value}' is not a valid {column_type}"),
+    "pattern": ("DQ-FMT", "format_violation",
+                "{column} '{value}' does not match the required format"),
+    "allowed_values": ("DQ-DOM", "domain_violation",
+                       "{column} '{value}' is not an allowed value"),
+    "reference": ("DQ-REF", "referential_integrity",
+                  "{column} '{value}' is not in {reference}"),
+    "range": ("DQ-RNG", "range_violation",
+              "{column} {value} is outside the allowed range {bounds}"),
+    "unique": ("DQ-DUP", "duplicate", "{column} '{value}' appears more than once"),
+    "duplicate_rows": ("DQ-DUP", "duplicate", "Row is an exact copy of an earlier row"),
+    "compare": ("DQ-BUS", "business_rule", "{left} must be {operator} {right}"),
+    "expression": ("DQ-BUS", "business_rule", "{name}"),
+    "derived": ("DQ-BUS", "business_rule", "{column} does not match {source}"),
+    "generate": ("DQ-BUS", "business_rule", "{column} could not be computed"),
+    "functional_dependency": ("DQ-CON", "consistency",
+                              "{determinant} '{value}' has conflicting values on other rows"),
+    "trim_whitespace": ("DQ-FMT", "format_violation", "{column} has surrounding spaces"),
+    "null_tokens": ("DQ-NULL", "null", "{column} '{value}' is a null placeholder"),
 }
 
 
@@ -60,6 +94,20 @@ class Rule:
     remediation: dict[str, Any] | None = None
     on_accept: str = "keep"
     origin: str = "rules"
+    error_code: str | None = None
+    message: str | None = None
+
+    @property
+    def error_category(self) -> str:
+        return ERROR_TYPES[self.type][1]
+
+    @property
+    def code(self) -> str:
+        return self.error_code or ERROR_TYPES[self.type][0]
+
+    @property
+    def message_template(self) -> str:
+        return self.message or ERROR_TYPES[self.type][2]
 
     def describe(self) -> dict[str, Any]:
         """JSON-safe summary for results."""
@@ -71,6 +119,8 @@ class Rule:
             "column": self.column,
             "dimension": self.dimension,
             "severity": self.severity,
+            "error_code": self.code,
+            "error_category": self.error_category,
             "remediation": (self.remediation or {}).get("action"),
             "origin": self.origin,
         }
@@ -115,6 +165,7 @@ def _schema_rule_name(column: str, check: str, spec: dict[str, Any]) -> str:
         "type": f"{column} is a valid {spec.get('type', 'string')}",
         "pattern": f"{column} matches {spec.get('pattern')}",
         "allowed_values": f"{column} is one of the allowed values",
+        "reference": f"{column} exists in {(spec.get('reference') or {}).get('path')}",
         "range": f"{column} is within its allowed range",
         "not_null": f"{column} is present",
         "unique": f"{column} is unique",
@@ -128,6 +179,8 @@ def _schema_check_applies(check: str, spec: dict[str, Any]) -> bool:
         return "pattern" in spec
     if check == "allowed_values":
         return "allowed_values" in spec
+    if check == "reference":
+        return "reference" in spec
     if check == "range":
         return "min" in spec or "max" in spec
     if check == "not_null":
@@ -174,6 +227,8 @@ def _build_schema_rules(
                 params["pattern"] = spec["pattern"]
             elif check == "allowed_values":
                 params["values"] = [str(v) for v in spec["allowed_values"]]
+            elif check == "reference":
+                params["reference"] = dict(spec["reference"])
             elif check == "range":
                 for key in ("min", "max", "exclusive_min", "exclusive_max"):
                     if key in spec:
@@ -193,6 +248,8 @@ def _build_schema_rules(
                     if check in SCHEMA_VALUE_CHECKS else "keep"
                 ),
                 origin="schema",
+                error_code=settings.get("error_code"),
+                message=settings.get("message"),
             )
 
             if check in SCHEMA_VALUE_CHECKS:
@@ -235,6 +292,8 @@ def _build_rule(entry: dict[str, Any], origin: str) -> Rule | None:
         remediation=entry.get("remediation"),
         on_accept=entry.get("on_accept", "keep"),
         origin=origin,
+        error_code=entry.get("error_code"),
+        message=entry.get("message"),
     )
 
 
@@ -283,9 +342,11 @@ def _validate(registry: Registry) -> None:
         referenced = _condition_columns(rule.when)
         if rule.column:
             referenced.add(rule.column)
-        for key in ("left", "right", "source"):
+        for key in ("left", "right", "source", "amount", "currency"):
             if key in rule.params:
                 referenced.add(rule.params[key])
+        for case in rule.params.get("cases", []) or []:
+            referenced |= _condition_columns(case.get("when"))
         referenced |= {c for c in rule.columns if c != "*"}
 
         unknown = referenced - schema_columns
@@ -318,6 +379,73 @@ def _validate(registry: Registry) -> None:
 
         if rule.type == "derived" and "source" not in rule.params:
             raise ConfigError(f"{where}: derived rules need a source")
+
+        if rule.type == "reference" and not rule.params.get("values"):
+            raise ConfigError(f"{where}: reference list is empty")
+
+        if rule.type == "expression":
+            if not rule.params.get("expression"):
+                raise ConfigError(f"{where}: expression rules need an expression")
+            if not rule.columns:
+                raise ConfigError(
+                    f"{where}: expression rules list the columns they use"
+                )
+
+        if rule.type == "generate":
+            method = rule.params.get("method")
+            if method not in GENERATE_METHODS:
+                raise ConfigError(f"{where}: unknown generate method {method}")
+            if not registry.columns.get(rule.column, {}).get("generated"):
+                raise ConfigError(
+                    f"{where}: {rule.column} is not marked generated in the schema"
+                )
+            needed = {
+                "convert_currency": ("amount", "currency", "rates"),
+                "case": ("cases",),
+            }[method]
+            missing = [key for key in needed if key not in rule.params]
+            if missing:
+                raise ConfigError(f"{where}: {method} needs {missing}")
+
+
+def _resolve_references(rules: list[Rule], root: Path) -> None:
+    """Load the values of every reference rule from its lookup file.
+
+    reference: {path: config/reference/branches.csv, column: branch_name}
+    The path is relative to the project root.
+    """
+
+    cache: dict[tuple[Path, str], list[str]] = {}
+
+    for rule in rules:
+        if rule.type != "reference":
+            continue
+
+        spec = rule.params.get("reference") or {}
+        if "path" not in spec or "column" not in spec:
+            raise ConfigError(f"Rule {rule.id}: reference needs path and column")
+
+        path = Path(spec["path"])
+        if not path.is_absolute():
+            path = root / path
+        key = (path, spec["column"])
+
+        if key not in cache:
+            if not path.is_file():
+                raise ConfigError(f"Rule {rule.id}: reference file not found: {path}")
+            with path.open(encoding="utf-8-sig", newline="") as handle:
+                reader = csv.DictReader(handle)
+                if spec["column"] not in (reader.fieldnames or []):
+                    raise ConfigError(
+                        f"Rule {rule.id}: {path.name} has no column {spec['column']}"
+                    )
+                cache[key] = sorted({
+                    row[spec["column"]].strip()
+                    for row in reader
+                    if (row[spec["column"]] or "").strip()
+                })
+
+        rule.params["values"] = cache[key]
 
 
 def load_registry(rules_path: Path, schema_path: Path | None = None) -> Registry:
@@ -367,6 +495,9 @@ def load_registry(rules_path: Path, schema_path: Path | None = None) -> Registry
         business_rules=business,
     )
 
+    # Reference files are relative to the project root (rules live in
+    # config/rules).
+    _resolve_references(registry.all_rules(), rules_path.resolve().parents[2])
     _validate(registry)
 
     return registry

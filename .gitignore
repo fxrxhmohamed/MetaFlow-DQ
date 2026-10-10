@@ -53,3 +53,8 @@ airflow/logs/
 *.db
 *.sqlite
 *.sqlite3
+
+# Data-quality pipeline outputs
+data/validated/
+data/corrected/
+data/final/

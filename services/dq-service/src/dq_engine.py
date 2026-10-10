@@ -1,49 +1,70 @@
 """Data Quality Engine.
 
-Reads the schema registry and quality rules, validates a CSV batch,
+Reads the schema registry and quality rules, validates a batch,
 remediates what the rules allow, and splits the records into:
 
-    accepted    clean, standardised records (warnings flagged per row)
+    valid       clean, standardised records (warnings flagged per row)
     quarantine  records with an unresolved critical failure, with their
-                original values and the failed rule ids
+                cleaned values, and one error line per failed rule
 
-Every repair attempt is written to a remediation audit (original value,
-cleaned value, rule id, action, outcome) and a run summary is written to
-dq_result.json.
+Every record is identified by its record id (from the ingestion
+manifest), so it can be followed through quarantine, correction and
+re-validation (quarantine.py). Every automatic repair is written to a
+remediation audit and a run summary to dq_result.json. See layout.py for
+the folder structure.
 
 Usage
 -----
-    # Banking defaults (input path comes from the schema registry)
-    python src/dq_engine.py
+    # An ingested file (see services/ingestion-service)
+    python src/dq_engine.py --ingestion ING_20261011_001
+    python src/dq_engine.py --ingestion latest
 
-    # Another file, rules or output folder
-    python src/dq_engine.py --input data/raw/banking/extract.csv \
-        --rules config/rules/quality_rules.yaml --output-root data
+    # Validate again from scratch (removes that run's outputs)
+    python src/dq_engine.py --ingestion ING_20261011_001 --force
+
+    # An ad hoc file without ingestion (record ids ROW_000001, ...)
+    python src/dq_engine.py --input data/raw/banking/extract.csv
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pandas as pd
 
 from checks import (
     condition_mask,
+    dependency_columns,
     detect,
     functional_dependency,
+    generated_values,
     null_token_mask,
     null_tokens,
     whitespace_mask,
 )
+from layout import (
+    OPEN,
+    STATUS_COLUMNS,
+    Layout,
+    LayoutError,
+    ingestion_folder,
+    now_utc,
+    read_manifest,
+    record_ids,
+    save_status,
+    write_csv,
+)
 from registry import ConfigError, Registry, Rule, load_registry
 from remediation import remediate
-from values import canonical_text, parse_values
+from values import as_flags, canonical_text, parse_values
 
 
 # ============================================================
@@ -61,10 +82,16 @@ PROJECT_ROOT = _default_project_root()
 
 DEFAULT_RULES = PROJECT_ROOT / "config" / "rules" / "quality_rules.yaml"
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "data"
+DEFAULT_RAW_ROOT = PROJECT_ROOT / "data" / "raw"
 
 AUDIT_COLUMNS = [
-    "source_row", "record_key", "column", "original_value",
-    "cleaned_value", "rule_id", "action", "outcome",
+    "record_id", "column", "original_value", "cleaned_value",
+    "rule_id", "action", "outcome",
+]
+
+ERROR_COLUMNS = [
+    "record_id", "rule_id", "rule_name", "error_code", "error_category",
+    "dimension", "severity", "column", "value", "message",
 ]
 
 
@@ -75,25 +102,39 @@ AUDIT_COLUMNS = [
 class Batch:
     """The records being validated, with their working (cleaned) values.
 
-    raw     original text from the file (never modified)
-    data    working text, updated by remediation
+    raw     input text (never modified)
+    data    working text, updated by remediation; generated columns that
+            the input lacks are added empty, in schema order
     active  False for rows removed as exact duplicates
     """
 
-    def __init__(self, raw: pd.DataFrame, registry: Registry) -> None:
+    def __init__(
+        self,
+        raw: pd.DataFrame,
+        registry: Registry,
+        ids: pd.Series,
+    ) -> None:
         self.raw = raw
         self.data = raw.copy()
         self.registry = registry
+        self.record_ids = pd.Series(ids.to_numpy(), index=raw.index, dtype="string")
+
+        # Generated columns the input does not provide: filled by their
+        # generate rule, without an audit entry per row.
+        self.filled_columns = {
+            column for column, spec in registry.columns.items()
+            if spec.get("generated") and column not in raw.columns
+        }
+        if self.filled_columns:
+            order = [c for c in registry.columns if c in raw.columns
+                     or c in self.filled_columns]
+            order += [c for c in raw.columns if c not in registry.columns]
+            self.data = self.data.reindex(columns=order).astype("string")
+
         self.active = pd.Series(True, index=raw.index)
         self.failures: list[tuple[Rule, pd.Series]] = []
         self.audit: list[pd.DataFrame] = []
         self._typed: dict[str, pd.Series] = {}
-
-        key_column = (registry.dataset.get("primary_key") or [None])[0]
-        self.record_keys = (
-            raw[key_column] if key_column in raw.columns
-            else pd.Series(pd.NA, index=raw.index, dtype="string")
-        )
 
     def spec(self, column: str) -> dict[str, Any]:
         return self.registry.columns.get(column, {"type": "string"})
@@ -124,8 +165,7 @@ class Batch:
             return
 
         self.audit.append(pd.DataFrame({
-            "source_row": index + 1,
-            "record_key": self.record_keys[index].to_numpy(),
+            "record_id": self.record_ids[index].to_numpy(),
             "column": column,
             "original_value": original[index].to_numpy(),
             "cleaned_value": self.data.loc[index, column].to_numpy()
@@ -206,7 +246,7 @@ def run_value_rule(
 
 
 def run_duplicate_rows(batch: Batch, rule: Rule, stats: dict[str, Any]) -> None:
-    """Exact copies of an earlier row (on the original text)."""
+    """Exact copies of an earlier row (on the input text)."""
 
     duplicated = batch.active & batch.raw.duplicated(keep="first")
     stats["checked"] = int(batch.active.sum())
@@ -238,10 +278,47 @@ def run_dependency(batch: Batch, rule: Rule, stats: dict[str, Any]) -> None:
     batch.fail(rule, failing)
 
 
+def run_generate(batch: Batch, rule: Rule, stats: dict[str, Any]) -> None:
+    """Fill a generated column from cleaned columns.
+
+    When the input lacks the column it is simply filled. When the input
+    has it, values that differ from the computed ones are replaced and
+    audited. Rows whose value cannot be computed fail the rule.
+    """
+
+    column = rule.column
+    scope = batch.active & condition_mask(batch, rule.when)
+    expected = generated_values(batch, rule)
+    missing = scope & expected.isna()
+
+    stats["checked"] = int(scope.sum())
+
+    if column in batch.filled_columns:
+        batch.write(column, expected[scope])
+    else:
+        current = batch.data[column]
+        differs = scope & expected.notna() & ~as_flags(current.eq(expected))
+        if differs.any():
+            original = current.copy()
+            batch.write(column, expected[differs])
+            batch.record_audit(
+                rule, column, differs[differs].index, original,
+                "derive", "remediated",
+            )
+        stats["remediated"] = int(differs.sum())
+
+    stats["unresolved"] = int(missing.sum())
+    stats["detected"] = stats["remediated"] + stats["unresolved"]
+    batch.fail(rule, missing)
+
+
 def run_rule(batch: Batch, rule: Rule) -> dict[str, Any]:
     stats = new_stats(rule)
 
-    if rule.type == "duplicate_rows":
+    if rule.type == "generate":
+        run_generate(batch, rule, stats)
+
+    elif rule.type == "duplicate_rows":
         run_duplicate_rows(batch, rule, stats)
 
     elif rule.type == "functional_dependency":
@@ -262,6 +339,98 @@ def run_rule(batch: Batch, rule: Rule) -> dict[str, Any]:
 
 
 # ============================================================
+# Error list (why each record failed)
+# ============================================================
+
+class _Placeholders(dict):
+    """format_map helper: unknown placeholders stay as written."""
+
+    def __missing__(self, key: str) -> str:
+        return "{" + key + "}"
+
+
+def _bounds(params: dict[str, Any]) -> str:
+    low, high = params.get("min"), params.get("max")
+    return (
+        ("(" if params.get("exclusive_min") else "[")
+        + ("-inf" if low is None else str(low)) + " .. "
+        + ("+inf" if high is None else str(high))
+        + (")" if params.get("exclusive_max") else "]")
+    )
+
+
+def error_column(batch: Batch, rule: Rule) -> str | None:
+    """Column an error points at (the one to correct)."""
+
+    if rule.type == "functional_dependency":
+        return dependency_columns(batch, rule)[0]
+    if rule.type == "compare":
+        return rule.params["left"]
+    if rule.column:
+        return rule.column
+    if rule.type == "expression" and rule.columns:
+        return rule.columns[0]
+    return None
+
+
+def build_errors(batch: Batch) -> pd.DataFrame:
+    """One row per failed rule and record, with code and message."""
+
+    parts: list[pd.DataFrame] = []
+
+    for rule, mask in batch.failures:
+        index = mask[mask].index
+        column = error_column(batch, rule)
+        values = (
+            batch.data.loc[index, column] if column in batch.data.columns
+            else pd.Series(pd.NA, index=index, dtype="string")
+        )
+
+        context = _Placeholders(
+            column=column or "",
+            column_type=batch.spec(column).get("type", "string") if column else "",
+            bounds=_bounds(rule.params),
+            left=rule.params.get("left", ""),
+            right=rule.params.get("right", ""),
+            operator=rule.params.get("operator", ""),
+            source=rule.params.get("source", ""),
+            reference=(rule.params.get("reference") or {}).get("path", ""),
+            determinant=column or "",
+            name=rule.name,
+        )
+        template = rule.message_template
+
+        if "{value}" in template:
+            messages = [
+                template.format_map(
+                    _Placeholders(context, value="" if pd.isna(v) else v)
+                )
+                for v in values
+            ]
+        else:
+            messages = template.format_map(context)
+
+        parts.append(pd.DataFrame({
+            "record_id": batch.record_ids[index].to_numpy(),
+            "rule_id": rule.id,
+            "rule_name": rule.name,
+            "error_code": rule.code,
+            "error_category": rule.error_category,
+            "dimension": rule.dimension,
+            "severity": rule.severity,
+            "column": column,
+            "value": values.to_numpy(),
+            "message": messages,
+        }))
+
+    if not parts:
+        return pd.DataFrame(columns=ERROR_COLUMNS)
+
+    errors = pd.concat(parts, ignore_index=True)[ERROR_COLUMNS]
+    return errors.sort_values("record_id", kind="stable", ignore_index=True)
+
+
+# ============================================================
 # Accept / quarantine
 # ============================================================
 
@@ -277,6 +446,21 @@ def rule_id_lists(
         joined = joined.where(~mask, joined + rule.id + ";")
 
     return joined.str.rstrip(";")
+
+
+@dataclass
+class Validation:
+    """Outcome of validating a batch."""
+
+    batch: Batch
+    accepted: pd.Series       # mask
+    quarantined: pd.Series    # mask
+    flagged: pd.Series        # mask: accepted with warnings
+    valid: pd.DataFrame       # record_id, values, dq_warnings
+    quarantine: pd.DataFrame  # record_id, values, dq_errors, dq_warnings
+    errors: pd.DataFrame      # ERROR_COLUMNS
+    audit: pd.DataFrame       # AUDIT_COLUMNS
+    rule_stats: list[dict[str, Any]]
 
 
 def split_records(batch: Batch) -> dict[str, Any]:
@@ -321,30 +505,74 @@ def split_records(batch: Batch) -> dict[str, Any]:
     errors_text = rule_id_lists(quarantine_failures, index)
     formats = batch.registry.dataset.get("canonical_formats", {})
 
+    # Canonical text for dates and times; values that cannot be read keep
+    # their working text so quarantined records show what is wrong.
     clean = batch.data.copy()
     for column in clean.columns:
         if column not in batch.registry.columns:
             continue
         text = canonical_text(batch.typed(column), batch.spec(column), formats)
         if text is not None:
-            clean[column] = text
+            clean[column] = text.where(text.notna(), batch.data[column])
 
-    accepted_frame = clean[accepted].copy()
-    accepted_frame.insert(0, "dq_source_row", accepted[accepted].index + 1)
-    accepted_frame["dq_warnings"] = warnings_text[accepted]
+    clean.insert(0, "record_id", batch.record_ids)
 
-    quarantine_frame = batch.raw[quarantined].copy()
-    quarantine_frame.insert(0, "dq_source_row", quarantined[quarantined].index + 1)
-    quarantine_frame["dq_errors"] = errors_text[quarantined]
-    quarantine_frame["dq_warnings"] = warnings_text[quarantined]
+    valid = clean[accepted].copy()
+    valid["dq_warnings"] = warnings_text[accepted]
+
+    quarantine = clean[quarantined].copy()
+    quarantine["dq_errors"] = errors_text[quarantined]
+    quarantine["dq_warnings"] = warnings_text[quarantined]
 
     return {
-        "accepted": accepted_frame,
-        "quarantine": quarantine_frame,
-        "accepted_mask": accepted,
-        "quarantined_mask": quarantined,
-        "flagged_mask": accepted & warnings_text.ne(""),
+        "valid": valid,
+        "quarantine": quarantine,
+        "accepted": accepted,
+        "quarantined": quarantined,
+        "flagged": accepted & warnings_text.ne(""),
     }
+
+
+def validate_frame(
+    frame: pd.DataFrame,
+    registry: Registry,
+    ids: pd.Series,
+    log: Callable[[str], None] = print,
+) -> Validation:
+    """Run every rule on a batch and split it into valid and quarantine."""
+
+    batch = Batch(frame.reset_index(drop=True), registry, ids)
+    rule_stats = []
+
+    for rule in registry.all_rules():
+        step = time.perf_counter()
+        stats = run_rule(batch, rule)
+        rule_stats.append(stats)
+        if stats["detected"]:
+            log(f"  {rule.id:<45} detected {stats['detected']:>8}  "
+                f"unresolved {stats['unresolved']:>8}  "
+                f"({time.perf_counter() - step:.1f}s)")
+
+    # Before the split: it nulls invalid values in accepted rows.
+    errors = build_errors(batch)
+    split = split_records(batch)
+
+    audit = (
+        pd.concat(batch.audit, ignore_index=True)
+        if batch.audit else pd.DataFrame(columns=AUDIT_COLUMNS)
+    )
+
+    return Validation(
+        batch=batch,
+        accepted=split["accepted"],
+        quarantined=split["quarantined"],
+        flagged=split["flagged"],
+        valid=split["valid"],
+        quarantine=split["quarantine"],
+        errors=errors,
+        audit=audit,
+        rule_stats=rule_stats,
+    )
 
 
 # ============================================================
@@ -352,22 +580,20 @@ def split_records(batch: Batch) -> dict[str, Any]:
 # ============================================================
 
 def summarize(
-    batch: Batch,
-    split: dict[str, Any],
-    rule_stats: list[dict[str, Any]],
-    audit: pd.DataFrame,
+    result: Validation,
     run: dict[str, Any],
 ) -> dict[str, Any]:
+    batch = result.batch
     input_rows = len(batch.raw)
     processed = int(batch.active.sum())
-    accepted = int(split["accepted_mask"].sum())
-    quarantined = int(split["quarantined_mask"].sum())
+    accepted = int(result.accepted.sum())
+    quarantined = int(result.quarantined.sum())
 
     def rate(part: int, whole: int) -> float:
         return round(part / whole * 100, 4) if whole else 0.0
 
     dimensions: dict[str, dict[str, int]] = {}
-    for stats in rule_stats:
+    for stats in result.rule_stats:
         bucket = dimensions.setdefault(stats["dimension"], {
             "rules": 0, "detected": 0, "remediated": 0, "unresolved": 0,
         })
@@ -375,21 +601,30 @@ def summarize(
         for key in ("detected", "remediated", "unresolved"):
             bucket[key] += stats[key]
 
-    accepted_mask = split["accepted_mask"]
     columns = {
         column: {
             "missing_in_input": int(batch.raw[column].isna().sum()),
             "missing_in_accepted": int(
-                batch.data.loc[accepted_mask, column].isna().sum()
+                batch.data.loc[result.accepted, column].isna().sum()
             ),
         }
         for column in batch.raw.columns
     }
 
+    audit = result.audit
     outcomes = (
         audit.groupby(["action", "outcome"]).size()
         .rename("count").reset_index().to_dict("records")
         if len(audit) else []
+    )
+
+    in_quarantine = result.errors["record_id"].isin(
+        batch.record_ids[result.quarantined]
+    )
+    errors_by_category = (
+        result.errors[in_quarantine]
+        .groupby(["error_category", "error_code"]).size()
+        .rename("count").reset_index().to_dict("records")
     )
 
     return {
@@ -399,7 +634,7 @@ def summarize(
             "duplicate_rows_removed": input_rows - processed,
             "processed_rows": processed,
             "accepted_rows": accepted,
-            "accepted_with_warnings_rows": int(split["flagged_mask"].sum()),
+            "accepted_with_warnings_rows": int(result.flagged.sum()),
             "quarantined_rows": quarantined,
             "acceptance_rate": rate(accepted, processed),
             "quarantine_rate": rate(quarantined, processed),
@@ -408,8 +643,9 @@ def summarize(
             ) if len(audit) else 0,
         },
         "dimensions": dimensions,
+        "quarantine_errors": errors_by_category,
         "remediation_outcomes": outcomes,
-        "rules": rule_stats,
+        "rules": result.rule_stats,
         "columns": columns,
     }
 
@@ -418,24 +654,29 @@ def summarize(
 # Main
 # ============================================================
 
-def read_source(path: Path, dataset: dict[str, Any]) -> pd.DataFrame:
+def read_source(path: Path, encoding: str, delimiter: str) -> pd.DataFrame:
     """Read every column as text; empty cells become null."""
 
-    source = dataset.get("source", {})
     frame = pd.read_csv(
         path,
         dtype="string",
         keep_default_na=False,
-        sep=source.get("delimiter", ","),
-        encoding=source.get("encoding", "utf-8-sig"),
+        sep=delimiter,
+        encoding=encoding,
     )
     return frame.mask(frame.eq(""))
 
 
 def check_columns(frame: pd.DataFrame, registry: Registry) -> dict[str, list]:
-    """Schema drift: missing columns stop the run, extra ones are kept."""
+    """Schema drift: missing columns stop the run, extra ones are kept.
 
-    expected = list(registry.columns)
+    Generated columns may be missing; the engine fills them.
+    """
+
+    expected = [
+        column for column, spec in registry.columns.items()
+        if not spec.get("generated")
+    ]
     missing = [c for c in expected if c not in frame.columns]
     extra = [c for c in frame.columns if c not in registry.columns]
 
@@ -445,19 +686,20 @@ def check_columns(frame: pd.DataFrame, registry: Registry) -> dict[str, list]:
     return {"missing_columns": missing, "extra_columns": extra}
 
 
-def write_csv(frame: pd.DataFrame, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    frame.to_csv(path, index=False, encoding="utf-8")
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Validate a CSV batch against the schema registry "
-        "and quality rules; split accepted and quarantined records.",
+        description="Validate a batch against the schema registry and "
+        "quality rules; split valid and quarantined records.",
     )
-    parser.add_argument(
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument(
+        "--ingestion", default="latest",
+        help="Ingestion id under --raw-root/<dataset>, or 'latest' "
+        "(default).",
+    )
+    source.add_argument(
         "--input", type=Path, default=None,
-        help="CSV file to validate (default: source path in the schema).",
+        help="Ad hoc CSV file instead of an ingestion.",
     )
     parser.add_argument(
         "--rules", type=Path, default=DEFAULT_RULES,
@@ -468,12 +710,22 @@ def parse_args() -> argparse.Namespace:
         help="Schema registry YAML (default: the one named in the rules).",
     )
     parser.add_argument(
+        "--raw-root", type=Path, default=DEFAULT_RAW_ROOT,
+        help="Raw layer root holding <dataset>/<ingestion id>/ folders.",
+    )
+    parser.add_argument(
         "--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT,
-        help="Folder holding clean/, quarantine/ and quality/ outputs.",
+        help="Folder holding validated/, quarantine/, corrected/ and "
+        "quality/.",
     )
     parser.add_argument(
         "--run-id", default=None,
-        help="Run identifier (default: UTC timestamp).",
+        help="Run id for --input (default: UTC timestamp).",
+    )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="Validate a run again, removing its previous outputs "
+        "(including quarantine rounds and corrections).",
     )
     return parser.parse_args()
 
@@ -486,51 +738,95 @@ def main() -> int:
     registry = load_registry(args.rules, args.schema)
     dataset = registry.dataset
     name = dataset.get("name", "dataset")
-    run_id = args.run_id or started.strftime("%Y%m%dT%H%M%SZ")
+    source_cfg = dataset.get("source", {})
 
-    input_path = args.input or PROJECT_ROOT / dataset["source"]["path"]
+    if args.input:
+        input_path = args.input
+        run_id = args.run_id or started.strftime("%Y%m%dT%H%M%SZ")
+        encoding = source_cfg.get("encoding", "utf-8-sig")
+        delimiter = source_cfg.get("delimiter", ",")
+        prefix, width = "ROW_", 6
+        manifest = None
+    else:
+        folder = ingestion_folder(args.raw_root, name, args.ingestion)
+        manifest = read_manifest(folder)
+        input_path = folder / manifest["stored_file"]
+        run_id = manifest["ingestion_id"]
+        encoding = manifest.get("encoding", "utf-8-sig")
+        delimiter = manifest.get("delimiter", ",")
+        prefix = manifest["record_id"]["prefix"]
+        width = manifest["record_id"]["width"]
+
+    layout = Layout(args.output_root, name, run_id)
+
+    if layout.status_file.exists():
+        if not args.force:
+            raise ConfigError(
+                f"Run {run_id} is already validated; use --force to start "
+                "over (this removes its quarantine rounds and corrections)."
+            )
+        for path in layout.run_dirs():
+            shutil.rmtree(path, ignore_errors=True)
+
     print(f"Run {run_id}: {input_path}")
     print(f"Loaded {len(registry.all_rules())} rules.")
 
-    raw = read_source(input_path, dataset)
+    raw = read_source(input_path, encoding, delimiter)
     drift = check_columns(raw, registry)
     if drift["extra_columns"]:
         print(f"Columns not in the schema (kept, not validated): "
               f"{drift['extra_columns']}")
 
-    batch = Batch(raw, registry)
-    rule_stats = []
+    if manifest and len(raw) != manifest["row_count"]:
+        raise ConfigError(
+            f"Read {len(raw)} rows but the manifest records "
+            f"{manifest['row_count']}."
+        )
 
-    for rule in registry.all_rules():
-        step = time.perf_counter()
-        stats = run_rule(batch, rule)
-        rule_stats.append(stats)
-        print(f"  {rule.id:<45} detected {stats['detected']:>8}  "
-              f"unresolved {stats['unresolved']:>8}  "
-              f"({time.perf_counter() - step:.1f}s)")
+    ids = record_ids(prefix, width, len(raw))
+    result = validate_frame(raw, registry, ids)
 
-    split = split_records(batch)
-    audit = (
-        pd.concat(batch.audit, ignore_index=True)
-        if batch.audit else pd.DataFrame(columns=AUDIT_COLUMNS)
+    # ---- Outputs ----
+    round_dir = layout.quarantine_round(1)
+    quality_dir = layout.quality_round(1)
+    quarantined_ids = result.quarantine["record_id"]
+
+    write_csv(result.valid, layout.valid_file)
+    write_csv(result.quarantine, round_dir / "quarantine_records.csv")
+    write_csv(
+        result.errors[result.errors["record_id"].isin(quarantined_ids)],
+        round_dir / "quarantine_errors.csv",
     )
+    write_csv(result.audit, quality_dir / "remediation_audit.csv")
 
-    root = args.output_root
+    timestamp = now_utc()
+    save_status(layout, pd.DataFrame({
+        "record_id": quarantined_ids.to_numpy(),
+        "status": OPEN,
+        "round": 1,
+        "attempts": 0,
+        "updated_at": timestamp,
+    }, columns=STATUS_COLUMNS))
+
     outputs = {
-        "accepted": root / "clean" / name / run_id / "accepted.csv",
-        "quarantine": root / "quarantine" / name / run_id / "quarantine.csv",
-        "audit": root / "quality" / name / run_id / "remediation_audit.csv",
-        "result": root / "quality" / name / run_id / "dq_result.json",
+        "valid": layout.valid_file,
+        "quarantine_records": round_dir / "quarantine_records.csv",
+        "quarantine_errors": round_dir / "quarantine_errors.csv",
+        "quarantine_status": layout.status_file,
+        "audit": quality_dir / "remediation_audit.csv",
+        "result": quality_dir / "dq_result.json",
     }
-
-    write_csv(split["accepted"], outputs["accepted"])
-    write_csv(split["quarantine"], outputs["quarantine"])
-    write_csv(audit, outputs["audit"])
 
     run = {
         "run_id": run_id,
+        "round": 1,
         "dataset": name,
         "source_file": str(input_path),
+        "ingestion": manifest and {
+            "ingestion_id": manifest["ingestion_id"],
+            "sha256": manifest["sha256"],
+            "ingested_at": manifest["ingested_at"],
+        },
         "started_at": started.isoformat(),
         "finished_at": datetime.now(timezone.utc).isoformat(),
         "duration_seconds": round(time.perf_counter() - clock, 2),
@@ -543,20 +839,20 @@ def main() -> int:
         "schema_drift": drift,
         "outputs": {key: str(path) for key, path in outputs.items()},
     }
-    result = summarize(batch, split, rule_stats, audit, run)
+    summary = summarize(result, run)
 
     with outputs["result"].open("w", encoding="utf-8") as handle:
-        json.dump(result, handle, indent=2, ensure_ascii=False, default=str)
+        json.dump(summary, handle, indent=2, ensure_ascii=False, default=str)
 
-    counts = result["counts"]
+    counts = summary["counts"]
     print(
-        f"\nAccepted {counts['accepted_rows']} "
+        f"\nValid {counts['accepted_rows']} "
         f"({counts['accepted_with_warnings_rows']} with warnings), "
         f"quarantined {counts['quarantined_rows']}, "
         f"duplicates removed {counts['duplicate_rows_removed']}."
     )
     for key, path in outputs.items():
-        print(f"  {key:<11} {path}")
+        print(f"  {key:<19} {path}")
 
     return 0
 
@@ -564,6 +860,6 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except ConfigError as error:
-        print(f"Configuration error: {error}", file=sys.stderr)
+    except (ConfigError, LayoutError) as error:
+        print(f"Error: {error}", file=sys.stderr)
         sys.exit(2)

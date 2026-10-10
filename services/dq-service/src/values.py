@@ -23,8 +23,13 @@ ISO_TIME_FORMAT = "%H:%M:%S"
 # A number inside text, e.g. 'EGP 12,284.15' or '3780.11 LE'.
 NUMBER_IN_TEXT_PATTERN = r"[+-]?\d[\d,.\s]*\d|[+-]?\d"
 
-# hh:mm, hh:mm:ss or hh.mm.ss
-TIME_TEXT_PATTERN = r"^(\d{1,2})[:.](\d{2})(?:[:.](\d{2}))?$"
+# hh:mm, hh:mm:ss or hh.mm.ss, optionally on a 12-hour clock (07:19:20 PM)
+TIME_TEXT_PATTERN = (
+    r"^(\d{1,2})[:.](\d{2})(?:[:.](\d{2}))?(?:\s*([AaPp])\.?[Mm]\.?)?$"
+)
+
+# "today", "today-18y", "today+30d": a bound relative to the run date.
+RELATIVE_DATE_PATTERN = r"^today(?:\s*([+-])\s*(\d+)\s*([ymd]))?$"
 
 NUMERIC_TYPES = ("integer", "decimal")
 TEMPORAL_TYPES = ("date", "time", "year_month")
@@ -93,8 +98,15 @@ def resolve_bound(value: Any, column_type: str) -> Any:
         return None
 
     if column_type in TEMPORAL_TYPES:
-        if value == "today":
-            return pd.Timestamp(date.today())
+        relative = re.match(RELATIVE_DATE_PATTERN, str(value).strip())
+        if relative:
+            bound = pd.Timestamp(date.today())
+            sign, amount, unit = relative.groups()
+            if amount:
+                unit = {"y": "years", "m": "months", "d": "days"}[unit]
+                step = pd.DateOffset(**{unit: int(amount)})
+                bound = bound - step if sign == "-" else bound + step
+            return bound
         return pd.Timestamp(value)
 
     return float(value)
@@ -207,9 +219,11 @@ def recover_numbers(values: pd.Series) -> pd.Series:
 
 
 def repair_times(values: pd.Series) -> pd.Series:
-    """'12.30.15' -> '12:30:15', '9:05' -> '09:05:00'.
+    """'12.30.15' -> '12:30:15', '9:05' -> '09:05:00',
+    '07:19:20 PM' -> '19:19:20', '12:05:00 AM' -> '00:05:00'.
 
-    Times outside 00:00:00-23:59:59 are not repaired (NA).
+    Times outside 00:00:00-23:59:59 (or 1-12 o'clock with AM/PM) are not
+    repaired (NA).
     """
 
     parts = values.astype("string").str.strip().str.extract(TIME_TEXT_PATTERN)
@@ -217,7 +231,14 @@ def repair_times(values: pd.Series) -> pd.Series:
     minute = pd.to_numeric(parts[1].astype(object), errors="coerce")
     second = pd.to_numeric(parts[2].astype(object), errors="coerce").fillna(0)
 
-    valid = hour.le(23) & minute.le(59) & second.le(59)
+    meridiem = parts[3].str.casefold()
+    twelve_hour = meridiem.notna()
+    valid_hour = hour.le(23) & ~twelve_hour | hour.between(1, 12) & twelve_hour
+    hour = hour.where(
+        ~twelve_hour, hour % 12 + as_flags(meridiem.eq("p")) * 12,
+    )
+
+    valid = valid_hour & minute.le(59) & second.le(59)
     result = pd.Series(pd.NA, index=values.index, dtype="string")
 
     if valid.any():

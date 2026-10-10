@@ -1,5 +1,5 @@
 # ==============================================================
-# Quality rules: Egypt banking channel adoption transactions
+# Quality rules: Egypt banking transactions
 # ==============================================================
 #
 # Read by the Data Quality Engine (services/dq-service). Each rule
@@ -10,10 +10,17 @@
 #   warning  -> the row is accepted and flagged (dq_warnings column)
 #   info     -> counted only
 #
+# Policy: identifiers and reference values come from the bank's systems,
+# so a missing id or an unknown category means the record cannot be
+# trusted (critical). Formatting problems (case, spacing, date and time
+# layouts, number text, id separators) are repaired first; only values
+# that cannot be repaired fail.
+#
 # Rules run in this order:
 #   1. preprocessing   (whole-file clean-up)
 #   2. schema_checks   (generated from config/metadata/schema_registry.yaml)
-#   3. rules           (business, cross-column and relationship rules)
+#   3. rules           (generated columns, business, cross-column and
+#                       relationship rules, in file order)
 #
 # Common rule keys
 #   id            unique, stable identifier (used in audit and results)
@@ -29,13 +36,26 @@
 #   on_accept     set_null | keep: what to do with a value that still
 #                 fails when its row is accepted (default per section)
 #   enabled       false to switch a rule off
+#   error_code    code in the quarantine error list (default per rule
+#                 type: DQ-NULL, DQ-TYPE, DQ-FMT, DQ-DOM, DQ-REF, DQ-RNG,
+#                 DQ-DUP, DQ-BUS, DQ-CON)
+#   message       error message template, e.g. "{column} '{value}' ..."
+#                 (default per rule type)
 #
 # Rule types
 #   not_null, is_null, allowed_values {values}, pattern {pattern},
 #   range {min, max, exclusive_min, exclusive_max}, type, unique,
 #   compare {left, operator, right, offset: {years|days}},
 #   derived {source, format}, functional_dependency {entity|dependency},
-#   duplicate_rows, trim_whitespace, null_tokens
+#   duplicate_rows, trim_whitespace, null_tokens,
+#   reference {reference: {path, column}}: value exists in a lookup file
+#   expression {expression, columns}: a pandas expression over typed
+#     columns that must hold, e.g. "abs(a - b * c) <= 0.01"; rows with a
+#     missing input are not judged
+#   generate {method: convert_currency {amount, currency, rates,
+#            decimals} | case {cases: [{when, value}], default}}
+#     fills a column marked "generated" in the schema; rows whose value
+#     cannot be computed fail the rule
 #
 # Conditions ("when")
 #   {column: c, in: [..]} | {column: c, not_in: [..]} |
@@ -46,11 +66,12 @@
 # Remediation actions
 #   trim, set_null {values?}, canonicalize {map?}, parse_number,
 #   parse_date {formats}, parse_time, reformat_id {patterns, template},
-#   derive, swap_day_month, drop_duplicates
+#   replace {substitutions: [{pattern, replace}]}, derive,
+#   swap_day_month, drop_duplicates
 #   Add "target: <column>" to repair a different column than the one
 #   checked (derived rules only).
 
-version: 1
+version: 2
 schema: config/metadata/schema_registry.yaml
 
 severity_levels:
@@ -102,12 +123,18 @@ preprocessing:
 # One rule per column and check, with id SCH-<column>-<check>.
 # Checks: type, pattern, allowed_values, range, not_null (nullable:
 # false only), unique (unique: true only).
+#
+# Defaults are critical: a missing id, a non-number in a number column,
+# a value outside a lookup list or a range breach quarantines the row.
+# Lookup values are canonicalised first ('ATM ', 'atm', 'Mobile_App').
 
 schema_checks:
   defaults:
     type:           {severity: critical, dimension: validity}
     pattern:        {severity: critical, dimension: validity}
     allowed_values: {severity: critical, dimension: validity,
+                     remediation: {action: canonicalize}}
+    reference:      {severity: critical, dimension: integrity,
                      remediation: {action: canonicalize}}
     range:          {severity: critical, dimension: validity}
     not_null:       {severity: critical, dimension: completeness}
@@ -120,21 +147,34 @@ schema_checks:
 
     # ---- Transaction ----
 
+    # Not null, TXN + 10 digits, no duplicates (both copies of a repeated
+    # id are quarantined).
+    transaction_id:
+      pattern:
+        remediation:
+          action: reformat_id
+          # 'txn-0000000001' -> 'TXN0000000001'
+          patterns: ['^TXN[\s_-]?(\d{10})$']
+          template: "TXN{0}"
+
+    # One layout: YYYY-MM-DD.
     transaction_date:
       type:
         remediation:
           action: parse_date
-          # Day-first slash dates (31/12/2023), dash dates, compact and
-          # month-name dates.
-          formats: ["%d/%m/%Y", "%d-%m-%Y", "%Y%m%d", "%d-%b-%y", "%d-%b-%Y", "%Y-%m-%d"]
+          # 2024/05/01, 27-09-2022, 14/08/2025 (day first), 07 Sep 2023
+          formats: &date_formats
+            ["%Y/%m/%d", "%d-%m-%Y", "%d/%m/%Y", "%d %b %Y", "%d-%b-%Y",
+             "%d-%b-%y", "%Y%m%d", "%Y-%m-%d"]
       range: {dimension: timeliness}
 
+    # One layout: HH:MM:SS on a 24-hour clock.
     transaction_time:
       type:
-        severity: warning
+        # '07:19:20 PM' -> '19:19:20', '12.30.15' -> '12:30:15'
         remediation: {action: parse_time}
-      not_null: {severity: warning}
 
+    # A number above 0.
     transaction_amount:
       type:
         remediation: {action: parse_number}
@@ -153,123 +193,256 @@ schema_checks:
             "جنيه": EGP
             "ج.م": EGP
 
+    # Fee, balance and channel cost: numbers, zero allowed, never negative.
     transaction_fee:
-      range: {severity: warning}
+      type:
+        remediation: {action: parse_number}
 
     balance_after_transaction:
-      range: {severity: warning}
+      type:
+        remediation: {action: parse_number}
+
+    estimated_channel_cost_egp:
+      type:
+        remediation: {action: parse_number}
 
     # ---- Channel ----
-
-    card_type:
-      allowed_values: {severity: warning}
-
-    merchant_name:
-      allowed_values: {severity: warning}
-
-    merchant_category:
-      allowed_values: {severity: warning}
-
-    channel_feature:
-      allowed_values: {severity: warning}
-      not_null: {severity: warning}
+    # transaction_type, transaction_status, card_type, channel_feature,
+    # digital_feature_use: lookup lists, anything else is quarantined
+    # (schema defaults). channel, merchant_name, merchant_category and
+    # failure_reason accept 'Other'.
 
     login_success:
       type: {severity: warning}
 
     session_duration_seconds:
-      type: {severity: warning}
+      type:
+        severity: warning
+        remediation: {action: parse_number}
       range: {severity: warning}
 
     attempt_count:
-      range: {severity: warning}
-
-    failure_reason:
-      allowed_values: {severity: warning}
-
-    estimated_channel_cost_egp:
-      type: {severity: warning}
-      range:
+      type:
         severity: warning
-        # -1, 0 and 999999 are placeholder values, not costs.
-        remediation: {action: set_null, values: [-1, 0, 999999]}
-      not_null: {severity: warning}
+        remediation: {action: parse_number}
+      range: {severity: warning}
 
     # ---- Account ----
 
+    # Not null, ACC + 7 digits.
     account_id:
       pattern:
         remediation:
           action: reformat_id
-          # '66821' -> 'ACC0066821'
-          patterns: ['^(\d{1,7})$']
+          # '66821' or 'acc-66821' -> 'ACC0066821'
+          patterns: ['^(\d{1,7})$', '^ACC[\s_-]?(\d{1,7})$']
           template: "ACC{0:0>7}"
 
+    # One layout: YYYY-MM-DD.
+    account_open_date:
+      type:
+        remediation:
+          action: parse_date
+          formats: *date_formats
+
+    # 0-100 %.
     interest_rate:
-      range: {severity: warning}
+      type:
+        remediation: {action: parse_number}
 
     # ---- Customer ----
 
+    # Not null (repeats are expected: one customer, many transactions).
     customer_id:
       pattern:
         remediation:
           action: reformat_id
           # 'c-018743' -> 'CUST018743'
-          patterns: ['^[cC]-?(\d{6})$']
+          patterns: ['^(?:CUST|C)[\s_-]?(\d{6})$']
           template: "CUST{0}"
 
+    # Names: letters with single spaces, hyphens or apostrophes. Tags and
+    # stray symbols are removed; what is left must match, and a name with
+    # nothing left becomes null and is quarantined by the not-null check.
     customer_first_name:
-      pattern: {severity: warning}
+      pattern:
+        remediation: &name_repair
+          action: replace
+          substitutions:
+            # 'BUSINESS_REVIEW_Karim' -> 'Karim'
+            - {pattern: '^(?:[A-Z]+_)+(?=[A-Z][a-z])', replace: ''}
+            # 'O?Connor' -> "O'Connor" (lost apostrophe)
+            - {pattern: '(?<=[A-Za-z])\?(?=[A-Za-z])', replace: "'"}
+            # 'Ali@#' -> 'Ali', '????' -> ''
+            - {pattern: "[^A-Za-z' -]", replace: ''}
+            - {pattern: '\s+', replace: ' '}
 
     customer_last_name:
-      pattern: {severity: warning}
+      pattern:
+        remediation: *name_repair
 
+    # At least 18 years old today (schema max: today-18y).
+    date_of_birth:
+      type:
+        remediation:
+          action: parse_date
+          formats: *date_formats
+
+    # Starts with a letter, exactly one @, ends with .com.
     email:
       pattern: {severity: warning}
 
+    # Validated by DQ-CUS-001 according to country_code.
     phone_number:
-      pattern: {severity: warning}
+      pattern: {enabled: false}
 
+    # City and occupation: must be a known text value; unknown ones are
+    # flagged and nulled, not quarantined.
     customer_city:
       allowed_values: {severity: warning}
       not_null: {severity: warning}
 
-    customer_governorate:
+    occupation:
       allowed_values: {severity: warning}
-      not_null: {severity: warning}
 
-    customer_segment:
-      allowed_values: {severity: warning}
-      not_null: {severity: warning}
+    # customer_governorate: one of the 27 governorates (schema default,
+    # quarantined otherwise).
 
+    # Above 0.
     annual_income:
-      range: {severity: warning}
+      type:
+        remediation: {action: parse_number}
 
+    # 0-850, zero allowed.
     credit_score:
-      range: {severity: warning}
+      type:
+        remediation: {action: parse_number}
+
+    # Not in the future.
+    customer_since_date:
+      type:
+        remediation:
+          action: parse_date
+          formats: *date_formats
+      range: {dimension: timeliness}
+
+    # ---- Bank and branch ----
+    # bank_name, bank_type (public/private), branch_name, branch_city,
+    # branch_governorate and branch_region: lookup lists, quarantined
+    # otherwise. bank_id, branch_id, bank_name, branch_name: not null.
+
+    bank_id:
+      pattern:
+        remediation:
+          action: reformat_id
+          # 'bnk-4' -> 'BNK04'
+          patterns: ['^BNK[\s_-]?(\d{1,2})$']
+          template: "BNK{0:0>2}"
+
+    branch_id:
+      pattern:
+        remediation:
+          action: reformat_id
+          # 'br-18' -> 'BR018'
+          patterns: ['^BR[\s_-]?(\d{1,3})$']
+          template: "BR{0:0>3}"
 
 
 # --------------------------------------------------------------
-# 3. Business, cross-column and relationship rules
+# 3. Generated columns, business, cross-column and relationship rules
 # --------------------------------------------------------------
 
 rules:
 
-  # ---- Derived values ----
+  # ---- Generated columns (run first; later rules use them) ----
 
-  # month is the reliable side: most mismatches are day-first dates
-  # ('1/3/2025' with month 2025-03), so the date is re-read day-first when
-  # that agrees with month. The rest are invalid future dates, which
-  # SCH-transaction_date-range already quarantines.
-  - id: DQ-CON-001
-    name: month equals the year-month of transaction_date
-    type: derived
-    column: month
-    source: transaction_date
-    format: "%Y-%m"
+  - id: DQ-GEN-001
+    name: amount_egp is transaction_amount in EGP
+    type: generate
+    column: amount_egp
+    method: convert_currency
+    amount: transaction_amount
+    currency: currency
+    # EGP per unit of currency. USD as given; SAR and AED from their USD
+    # pegs (3.75, 3.6725); EUR assumes 1 EUR = 1.08 USD. Update together.
+    rates:
+      EGP: 1
+      USD: 52.40
+      EUR: 56.59
+      SAR: 13.97
+      AED: 14.27
+    decimals: 2
+    dimension: consistency
+    severity: critical
+
+  - id: DQ-BUS-001
+    name: EGP amounts are not converted
+    type: expression
+    expression: abs(amount_egp - transaction_amount) <= 0.01
+    columns: [amount_egp, transaction_amount]
+    when: {column: currency, equals: EGP}
+    dimension: consistency
+    severity: critical
+    message: "amount_egp {value} differs from transaction_amount for an EGP transaction"
+
+  - id: DQ-BUS-002
+    name: The fee does not exceed the transaction amount
+    type: expression
+    expression: transaction_fee <= transaction_amount
+    columns: [transaction_fee, transaction_amount]
+    dimension: validity
+    severity: warning
+    message: "transaction_fee {value} is larger than the transaction amount"
+
+  - id: DQ-GEN-002
+    name: digital_migration_opportunity is 1 only for assisted transactions that could be digital
+    type: generate
+    column: digital_migration_opportunity
+    method: case
+    cases:
+      - when:
+          all:
+            - {column: channel, in: [ATM, Branch, Call Center]}
+            - {column: transaction_type, in: [Transfer, Bill Payment, Loan Repayment]}
+        value: "1"
+    default: "0"
     dimension: consistency
     severity: warning
-    remediation: {action: swap_day_month, target: transaction_date}
+
+  - id: DQ-GEN-003
+    name: country_code from customer_governorate
+    type: generate
+    column: country_code
+    method: case
+    cases:
+      - when:
+          column: customer_governorate
+          in: [Alexandria, Assiut, Aswan, Beheira, Beni Suef, Cairo, Dakahlia,
+               Damietta, Fayoum, Gharbia, Giza, Ismailia, Kafr El Sheikh,
+               Luxor, Matrouh, Minya, Monufia, New Valley, North Sinai,
+               Port Said, Qalyubia, Qena, Red Sea, Sharqia, Sohag,
+               South Sinai, Suez]
+        value: EG
+    dimension: completeness
+    severity: warning
+
+  # ---- Customer contact ----
+
+  - id: DQ-CUS-001
+    name: Egyptian phone numbers have 11 digits and a mobile prefix (010, 011, 012, 015)
+    type: pattern
+    column: phone_number
+    pattern: '^01[0125]\d{8}$'
+    when: {column: country_code, equals: EG}
+    dimension: validity
+    severity: warning
+    # '010-1234-5678' -> '01012345678', '+201012345678' -> '01012345678'
+    remediation:
+      action: replace
+      substitutions:
+        - {pattern: '[\s().-]', replace: ''}
+        - {pattern: '^(?:\+|00)20(?=1)', replace: '0'}
+    on_accept: set_null
 
   # ---- Channel consistency ----
 
@@ -278,7 +451,7 @@ rules:
     type: allowed_values
     column: digital_channel_flag
     values: ["1"]
-    when: {column: channel, in: [InstaPay, Internet Banking, Mobile App]}
+    when: &digital_channel {column: channel, in: [InstaPay, Internet Banking, Mobile App]}
     dimension: consistency
     severity: warning
 
@@ -287,60 +460,61 @@ rules:
     type: allowed_values
     column: digital_channel_flag
     values: ["0"]
-    when: {column: channel, in: [ATM, Branch, Call Center, POS, System]}
+    when: &assisted_channel {column: channel, in: [ATM, Branch, Call Center, POS, System]}
     dimension: consistency
     severity: warning
 
   - id: DQ-CON-004
-    name: Digital channels are used digitally
+    name: Digital channels use Funds Transfer
     type: allowed_values
     column: digital_feature_use
-    values: [Core Transaction, Feature Used]
-    when: {column: channel, in: [InstaPay, Internet Banking, Mobile App]}
+    values: [Funds Transfer]
+    when: *digital_channel
     dimension: consistency
     severity: warning
 
   - id: DQ-CON-005
-    name: Assisted channels are Assisted/Physical
+    name: Assisted channels have no digital feature
     type: allowed_values
     column: digital_feature_use
+    values: [Not Applicable]
+    when: *assisted_channel
+    dimension: consistency
+    severity: warning
+
+  - id: DQ-CON-006
+    name: Digital channels are Digital/Self-Service
+    type: allowed_values
+    column: channel_feature
+    values: [Digital/Self-Service]
+    when: *digital_channel
+    dimension: consistency
+    severity: warning
+
+  - id: DQ-CON-007
+    name: Assisted channels are Assisted/Physical
+    type: allowed_values
+    column: channel_feature
     values: [Assisted/Physical]
-    when: {column: channel, in: [ATM, Branch, Call Center, POS, System]}
+    when: *assisted_channel
     dimension: consistency
     severity: warning
 
   # ---- Conditional completeness (applicability) ----
 
   - id: DQ-CMP-001
-    name: login_success is required for digital use
+    name: login_success is required on digital channels
     type: not_null
     column: login_success
-    when: {column: digital_feature_use, in: [Core Transaction, Feature Used]}
+    when: {column: digital_channel_flag, equals: "1"}
     dimension: completeness
     severity: warning
 
   - id: DQ-CMP-002
-    name: login_success is empty for assisted use
+    name: login_success is empty on assisted channels
     type: is_null
     column: login_success
-    when: {column: digital_feature_use, equals: Assisted/Physical}
-    dimension: consistency
-    severity: warning
-    remediation: {action: set_null}
-
-  - id: DQ-CMP-003
-    name: session_duration_seconds is required for digital use
-    type: not_null
-    column: session_duration_seconds
-    when: {column: digital_feature_use, in: [Core Transaction, Feature Used]}
-    dimension: completeness
-    severity: warning
-
-  - id: DQ-CMP-004
-    name: session_duration_seconds is empty for assisted use
-    type: is_null
-    column: session_duration_seconds
-    when: {column: digital_feature_use, equals: Assisted/Physical}
+    when: {column: digital_channel_flag, equals: "0"}
     dimension: consistency
     severity: warning
     remediation: {action: set_null}
@@ -357,16 +531,16 @@ rules:
     name: card_type is empty for non-card channels
     type: is_null
     column: card_type
-    when: {column: channel, in: [Call Center, InstaPay, System]}
+    when: {column: channel, in: [Branch, Call Center, InstaPay, System]}
     dimension: consistency
     severity: warning
     remediation: {action: set_null}
 
   - id: DQ-CMP-007
-    name: merchant_name is required for purchases
+    name: merchant_name is required for purchases and bill payments
     type: not_null
     column: merchant_name
-    when: {column: transaction_type, equals: Purchase}
+    when: &merchant {column: transaction_type, in: [Purchase, Bill Payment]}
     dimension: completeness
     severity: warning
 
@@ -382,10 +556,10 @@ rules:
     remediation: {action: set_null}
 
   - id: DQ-CMP-009
-    name: merchant_category is required for purchases
+    name: merchant_category is required for purchases and bill payments
     type: not_null
     column: merchant_category
-    when: {column: transaction_type, equals: Purchase}
+    when: *merchant
     dimension: completeness
     severity: warning
 
@@ -407,10 +581,10 @@ rules:
     severity: warning
 
   - id: DQ-CMP-012
-    name: failure_reason is empty for completed transactions
+    name: failure_reason is empty unless the transaction failed
     type: is_null
     column: failure_reason
-    when: {column: transaction_status, equals: Completed}
+    when: {column: transaction_status, in: [Completed, Pending, Reversed]}
     dimension: consistency
     severity: warning
     remediation: {action: set_null}
@@ -418,14 +592,14 @@ rules:
   # ---- Business values ----
 
   - id: DQ-VAL-001
-    name: No fee on deposits, fees, interest, loan repayments and purchases
+    name: Only transfers and withdrawals carry a fee
     type: range
     column: transaction_fee
     min: 0
     max: 0
     when:
       column: transaction_type
-      in: [Deposit, Fee, Interest Credit, Loan Repayment, Purchase]
+      in: [Bill Payment, Deposit, Fee, Interest Credit, Loan Repayment, Purchase]
     dimension: validity
     severity: warning
 
