@@ -7,6 +7,8 @@ Under the output root (data/):
         records that passed on the first validation
     quarantine/<dataset>/<run>/quarantine_status.csv
         the ledger: one row per quarantined record with its status
+    quarantine/<dataset>/<run>/quarantine_history.csv
+        every status change of the ledger, in order
     quarantine/<dataset>/<run>/round_<n>/
         quarantine_records.csv   records open in round n (cleaned values)
         quarantine_errors.csv    one row per failed rule and record
@@ -19,6 +21,8 @@ Under the output root (data/):
         dq_result.json, remediation_audit.csv
     quality/<dataset>/<run>/correction_log.csv
         every manual correction, all rounds
+    final/<dataset>/<run>/clean.csv
+        silver: valid records plus resolved ones, one row per record
 
 Round 1 is the first validation; re-validating the corrections of
 round n produces round n + 1.
@@ -43,6 +47,7 @@ MANUAL_REVIEW = "MANUAL_REVIEW_REQUIRED"
 DISCARDED = "DISCARDED"
 
 STATUS_COLUMNS = ["record_id", "status", "round", "attempts", "updated_at"]
+HISTORY_COLUMNS = ["record_id", "status", "round", "attempts", "changed_at"]
 
 # Engine-added columns, never fed back into validation.
 DQ_COLUMNS = ("record_id", "dq_errors", "dq_warnings")
@@ -70,6 +75,14 @@ class Layout:
         return self._dir("quarantine") / "quarantine_status.csv"
 
     @property
+    def history_file(self) -> Path:
+        return self._dir("quarantine") / "quarantine_history.csv"
+
+    @property
+    def final_file(self) -> Path:
+        return self._dir("final") / "clean.csv"
+
+    @property
     def correction_log(self) -> Path:
         return self._dir("quality") / "correction_log.csv"
 
@@ -85,18 +98,14 @@ class Layout:
     def run_dirs(self) -> list[Path]:
         return [
             self._dir(area)
-            for area in ("validated", "quarantine", "corrected", "quality")
+            for area in ("validated", "quarantine", "corrected", "quality", "final")
         ]
 
 
 def latest_run(root: Path, dataset: str) -> str:
     """Most recent run that has a quarantine ledger."""
 
-    runs = sorted(
-        folder.name
-        for folder in (root / "quarantine" / dataset).glob("*")
-        if (folder / "quarantine_status.csv").is_file()
-    )
+    runs = list_runs(root, dataset)
     if not runs:
         raise LayoutError(f"No validated runs for {dataset} under {root}")
     return runs[-1]
@@ -190,7 +199,62 @@ def load_status(layout: Layout) -> pd.DataFrame:
 
 
 def save_status(layout: Layout, status: pd.DataFrame) -> None:
-    write_csv(status[STATUS_COLUMNS], layout.status_file)
+    """Write the ledger and append the rows that changed to its history."""
+
+    status = status[STATUS_COLUMNS]
+    previous = (
+        load_status(layout) if layout.status_file.is_file()
+        else pd.DataFrame(columns=STATUS_COLUMNS)
+    )
+
+    # Ledgers written before the history existed: their current state
+    # becomes its first entries.
+    if not layout.history_file.is_file() and len(previous):
+        _append_history(layout, previous)
+
+    key = ["record_id", "status", "round", "attempts"]
+    merged = status.merge(
+        previous[key].astype({"round": int, "attempts": int}),
+        on=key, how="left", indicator=True,
+    )
+    changed = status[merged["_merge"].eq("left_only").to_numpy()]
+
+    write_csv(status, layout.status_file)
+    if len(changed) or not layout.history_file.is_file():
+        _append_history(layout, changed)
+
+
+def _append_history(layout: Layout, rows: pd.DataFrame) -> None:
+    history = rows.rename(columns={"updated_at": "changed_at"})[HISTORY_COLUMNS]
+    path = layout.history_file
+    path.parent.mkdir(parents=True, exist_ok=True)
+    history.to_csv(
+        path, mode="a", header=not path.is_file(), index=False,
+        encoding="utf-8",
+    )
+
+
+def load_history(layout: Layout) -> pd.DataFrame:
+    """Status changes in order; the ledger itself when there is no history."""
+
+    if layout.history_file.is_file():
+        history = read_text_csv(layout.history_file)
+    else:
+        history = load_status(layout).rename(columns={"updated_at": "changed_at"})
+    history = history[HISTORY_COLUMNS].copy()
+    history["round"] = history["round"].astype(int)
+    history["attempts"] = history["attempts"].astype(int)
+    return history
+
+
+def list_runs(root: Path, dataset: str) -> list[str]:
+    """Runs that have a quarantine ledger, oldest first."""
+
+    return sorted(
+        folder.name
+        for folder in (root / "quarantine" / dataset).glob("*")
+        if (folder / "quarantine_status.csv").is_file()
+    )
 
 
 def current_round(status: pd.DataFrame) -> int | None:

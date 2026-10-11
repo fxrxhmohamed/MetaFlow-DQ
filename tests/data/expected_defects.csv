@@ -1,0 +1,28 @@
+row,defect,rule_id,outcome
+21,Spaces around a value,DQ-PRE-001,repaired
+22,Null placeholder 'N/A',DQ-PRE-002,repaired
+23,Wrong capitals in a category,SCH-customer_segment-allowed_values,repaired
+24,Date as DD/MM/YYYY,SCH-transaction_date-type,repaired
+25,Time on a 12-hour clock,SCH-transaction_time-type,repaired
+26,Number with thousands separators,SCH-annual_income-type,repaired
+27,ID with a separator,SCH-bank_id-pattern,repaired
+28,Digit in a name,SCH-customer_last_name-pattern,repaired
+29,Phone number in international format,DQ-CUS-001,repaired
+31,Exact copy of the previous row,DQ-PRE-003,removed
+32,Email with two @,SCH-email-pattern,flagged
+33,Phone number that cannot be repaired,DQ-CUS-001,flagged
+34,Fee on a deposit,DQ-VAL-001,flagged
+35,ATM transaction without a card type,DQ-CMP-005,flagged
+36,Customer younger than 18 when the relationship started,DQ-TML-003,flagged
+39,Customer with a different gender than on their other records,DQ-REL-002,flagged
+40,Missing customer ID,SCH-customer_id-not_null,quarantined
+41,Credit score outside 300-850,SCH-credit_score-range,quarantined
+42,Unknown transaction type,SCH-transaction_type-allowed_values,quarantined
+43,Amount that is not a number,SCH-transaction_amount-type,quarantined
+44,Transaction date in the future,SCH-transaction_date-range,quarantined
+45,Account ID in an unknown format,SCH-account_id-pattern,quarantined
+46,Branch that does not exist,SCH-branch_id-reference,quarantined
+47,Transaction before the account was opened,DQ-TML-001,quarantined
+48,Transaction ID used twice (first),SCH-transaction_id-unique,quarantined
+49,Transaction ID used twice (second),SCH-transaction_id-unique,quarantined
+50,Three values repaired automatically,DQ-REV-001,quarantined

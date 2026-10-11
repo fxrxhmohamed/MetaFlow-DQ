@@ -19,10 +19,16 @@ worked through in rounds:
                 they are.
     status      counts per status and round
 
+The correction UI (correction_ui.py) calls the same import and
+re-validation functions, so a fix gives the same result whichever way it
+is entered.
+
 Template columns you fill in
     new_value   the corrected value (__NULL__ to empty a field)
     action      blank or FIX to correct; DISCARD to drop the whole record
-                (e.g. the second copy of a duplicated transaction)
+                (e.g. the second copy of a duplicated transaction);
+                ACCEPT to confirm a record's automatic repairs as they are
+                (records held by an auto_fix_review rule)
     reason      why (kept in the correction log)
 Lines with neither new_value nor action are ignored. A column that the
 template does not list can be corrected by adding a line for it.
@@ -43,7 +49,9 @@ import getpass
 import json
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
+from typing import IO, Any, Callable
 
 import pandas as pd
 
@@ -68,7 +76,9 @@ from registry import ConfigError, Registry, load_registry
 
 
 NULL_MARKER = "__NULL__"
-ACTIONS = {"FIX", "DISCARD"}
+ACTIONS = {"FIX", "DISCARD", "ACCEPT"}
+# Actions on the whole record (no column, no new value).
+RECORD_ACTIONS = {"DISCARD", "ACCEPT"}
 
 TEMPLATE_COLUMNS = [
     "record_id", "column", "current_value", "error_codes", "severity",
@@ -116,19 +126,17 @@ def read_or_empty(path: Path, columns: list[str]) -> pd.DataFrame:
 # template
 # ============================================================
 
-def cmd_template(args: argparse.Namespace, registry: Registry) -> int:
-    layout = open_layout(args, registry)
-    status = load_status(layout)
-    round_number = args.round or require_round(status)
-    round_dir = layout.quarantine_round(round_number)
+def open_errors(layout: Layout, status: pd.DataFrame, round_number: int) -> pd.DataFrame:
+    """Error lines of the records still open in a round."""
 
-    errors = read_text_csv(round_dir / "quarantine_errors.csv")
-    errors = errors[errors["record_id"].isin(open_ids(status, round_number))]
+    errors = read_text_csv(
+        layout.quarantine_round(round_number) / "quarantine_errors.csv"
+    )
+    return errors[errors["record_id"].isin(open_ids(status, round_number))]
 
-    if args.rule:
-        errors = errors[errors["rule_id"].isin(args.rule)]
-    if args.error_code:
-        errors = errors[errors["error_code"].isin(args.error_code)]
+
+def build_template(errors: pd.DataFrame) -> pd.DataFrame:
+    """One line per record and column, with every error on that field."""
 
     # Critical problems first; one line per record and column.
     errors = errors.assign(
@@ -153,9 +161,24 @@ def cmd_template(args: argparse.Namespace, registry: Registry) -> int:
     template["new_value"] = ""
     template["action"] = ""
     template["reason"] = ""
+    return template[TEMPLATE_COLUMNS]
 
+
+def cmd_template(args: argparse.Namespace, registry: Registry) -> int:
+    layout = open_layout(args, registry)
+    status = load_status(layout)
+    round_number = args.round or require_round(status)
+    round_dir = layout.quarantine_round(round_number)
+
+    errors = open_errors(layout, status, round_number)
+    if args.rule:
+        errors = errors[errors["rule_id"].isin(args.rule)]
+    if args.error_code:
+        errors = errors[errors["error_code"].isin(args.error_code)]
+
+    template = build_template(errors)
     output = args.output or round_dir / "correction_template.csv"
-    write_csv(template[TEMPLATE_COLUMNS], output, excel=True)
+    write_csv(template, output, excel=True)
 
     print(f"Round {round_number}: {template['record_id'].nunique()} records, "
           f"{len(template)} lines to review.")
@@ -167,28 +190,55 @@ def cmd_template(args: argparse.Namespace, registry: Registry) -> int:
 # import
 # ============================================================
 
-def cmd_import(args: argparse.Namespace, registry: Registry) -> int:
-    layout = open_layout(args, registry)
+@dataclass
+class ImportResult:
+    round: int
+    accepted: pd.DataFrame  # CORRECTION_COLUMNS
+    refused: pd.DataFrame   # the refused lines, with the reason in 'refused'
+    corrections_file: Path
+
+
+def read_correction_file(source: Path | IO[bytes]) -> pd.DataFrame:
+    """An edited template (path or uploaded file), every cell as text."""
+
+    return pd.read_csv(
+        source, dtype="string", keep_default_na=False, encoding="utf-8-sig",
+    )
+
+
+def import_corrections(
+    layout: Layout,
+    registry: Registry,
+    lines: pd.DataFrame,
+    user: str,
+    dry_run: bool = False,
+) -> ImportResult:
+    """Check correction lines and store the accepted ones.
+
+    lines needs record_id, column and new_value; action and reason are
+    optional. Writes corrected/round_<n>/corrections.csv (the newest line
+    per field wins), appends to the correction log and writes the refused
+    lines to import_rejections.csv. dry_run only checks: nothing is written.
+    """
+
     status = load_status(layout)
     round_number = require_round(status)
     allowed_ids = open_ids(status, round_number)
 
-    lines = pd.read_csv(
-        args.file, dtype="string", keep_default_na=False, encoding="utf-8-sig",
-    )
     missing = {"record_id", "column", "new_value"} - set(lines.columns)
     if missing:
-        raise ConfigError(f"{args.file} is missing columns {sorted(missing)}")
+        raise ConfigError(f"Corrections are missing columns {sorted(missing)}")
 
+    lines = lines.copy()
     for column in ("action", "reason"):
         if column not in lines.columns:
             lines[column] = ""
     lines = lines[["record_id", "column", "new_value", "action", "reason"]]
-    lines = lines.apply(lambda c: c.str.strip())
+    lines = lines.astype("string").fillna("").apply(lambda c: c.str.strip())
     lines["action"] = lines["action"].str.upper().replace("", "FIX")
 
     # Untouched template lines.
-    touched = lines["new_value"].ne("") | lines["action"].eq("DISCARD")
+    touched = lines["new_value"].ne("") | lines["action"].isin(RECORD_ACTIONS)
     lines = lines[touched].copy()
 
     records = read_text_csv(
@@ -202,10 +252,10 @@ def cmd_import(args: argparse.Namespace, registry: Registry) -> int:
 
     def refusal(row: pd.Series) -> str:
         if row["action"] not in ACTIONS:
-            return f"unknown action '{row['action']}' (use FIX or DISCARD)"
+            return f"unknown action '{row['action']}' (use FIX, DISCARD or ACCEPT)"
         if row["record_id"] not in allowed_ids:
             return f"record is not open in round {round_number}"
-        if row["action"] == "DISCARD":
+        if row["action"] in RECORD_ACTIONS:
             return ""
         if row["column"] not in editable:
             return f"'{row['column']}' is not an editable schema column"
@@ -228,12 +278,11 @@ def cmd_import(args: argparse.Namespace, registry: Registry) -> int:
     refused = lines[lines["refused"].ne("")]
 
     def old_value(row: pd.Series) -> object:
-        if row["action"] == "DISCARD" or row["column"] not in records.columns:
+        if row["action"] in RECORD_ACTIONS or row["column"] not in records.columns:
             return pd.NA
         return records.at[row["record_id"], row["column"]]
 
     timestamp = now_utc()
-    user = args.user or getpass.getuser()
     accepted = accepted.assign(
         column=accepted["column"].where(accepted["action"].eq("FIX"), ""),
         old_value=[old_value(row) for _, row in accepted.iterrows()],
@@ -241,8 +290,16 @@ def cmd_import(args: argparse.Namespace, registry: Registry) -> int:
         corrected_at=timestamp,
     )[CORRECTION_COLUMNS]
 
-    # Merge with earlier imports for this round; the newest line wins.
     corrected_dir = layout.corrected_round(round_number)
+    if dry_run:
+        return ImportResult(
+            round=round_number,
+            accepted=accepted,
+            refused=refused,
+            corrections_file=corrected_dir / "corrections.csv",
+        )
+
+    # Merge with earlier imports for this round; the newest line wins.
     existing = read_or_empty(corrected_dir / "corrections.csv", CORRECTION_COLUMNS)
     existing["column"] = existing["column"].fillna("")
     merged = (
@@ -260,6 +317,23 @@ def cmd_import(args: argparse.Namespace, registry: Registry) -> int:
 
     if len(refused):
         write_csv(refused, corrected_dir / "import_rejections.csv", excel=True)
+
+    return ImportResult(
+        round=round_number,
+        accepted=accepted,
+        refused=refused,
+        corrections_file=corrected_dir / "corrections.csv",
+    )
+
+
+def cmd_import(args: argparse.Namespace, registry: Registry) -> int:
+    layout = open_layout(args, registry)
+    result = import_corrections(
+        layout, registry, read_correction_file(args.file),
+        args.user or getpass.getuser(),
+    )
+    round_number, accepted, refused = result.round, result.accepted, result.refused
+    corrected_dir = result.corrections_file.parent
 
     print(f"Round {round_number}: {len(accepted)} corrections accepted "
           f"({int(accepted['action'].eq('DISCARD').sum())} discards), "
@@ -285,9 +359,21 @@ def resolved_records(layout: Layout, before_round: int) -> list[pd.DataFrame]:
     ]
 
 
-def cmd_revalidate(args: argparse.Namespace, registry: Registry) -> int:
+def revalidate(
+    layout: Layout,
+    registry: Registry,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    revalidate_all: bool = False,
+    log: Callable[[str], None] = print,
+) -> dict[str, Any] | None:
+    """Apply the round's corrections and validate again (see module doc).
+
+    Returns the round summary (also written to dq_result.json), or None
+    when there is nothing to re-validate.
+    """
+
     clock = time.perf_counter()
-    layout = open_layout(args, registry)
+    started = now_utc()
     status = load_status(layout).set_index("record_id")
     round_number = require_round(status.reset_index())
     next_round = round_number + 1
@@ -308,15 +394,17 @@ def cmd_revalidate(args: argparse.Namespace, registry: Registry) -> int:
     fixes = corrections[
         corrections["action"].eq("FIX") & ~corrections["record_id"].isin(discard)
     ]
+    # Accepted as they are: re-validated without a change. Their values are
+    # already repaired, so the automatic-repair review does not fire again.
+    accepted = set(corrections.loc[corrections["action"].eq("ACCEPT"), "record_id"]) - discard
     targets = (
-        pending - discard if args.all else set(fixes["record_id"])
+        pending - discard if revalidate_all
+        else set(fixes["record_id"]) | accepted
     )
     untouched = pending - targets - discard
 
     if not targets and not discard:
-        print(f"Round {round_number}: no corrections to re-validate. "
-              "Import a correction file first (or use --all).")
-        return 0
+        return None
 
     # ---- Corrected records ----
     columns = data_columns(records.reset_index())
@@ -344,9 +432,10 @@ def cmd_revalidate(args: argparse.Namespace, registry: Registry) -> int:
     is_target = pd.Series(False, index=frame.index)
     is_target.iloc[len(context):] = True
 
-    print(f"Round {round_number}: re-validating {len(targets)} corrected "
-          f"records against {len(context)} others.")
-    result = validate_frame(frame, registry, ids)
+    log(f"Round {round_number}: re-validating {len(targets)} corrected "
+        f"records against {len(context)} others.")
+    # Rule statistics count the corrected records only.
+    result = validate_frame(frame, registry, ids, log=log, focus=is_target)
 
     target_ids = ids[is_target]
     passed = set(ids[is_target & result.accepted])
@@ -361,7 +450,7 @@ def cmd_revalidate(args: argparse.Namespace, registry: Registry) -> int:
 
     manual = {
         record for record in failed
-        if status.at[record, "attempts"] >= args.max_attempts
+        if status.at[record, "attempts"] >= max_attempts
     }
     still_open = (failed - manual) | untouched
 
@@ -410,11 +499,13 @@ def cmd_revalidate(args: argparse.Namespace, registry: Registry) -> int:
     summary = {
         "run_id": layout.run_id,
         "dataset": layout.dataset,
+        "round": next_round,
         "revalidated_round": round_number,
         "next_round": next_round,
+        "started_at": started,
         "finished_at": timestamp,
         "duration_seconds": round(time.perf_counter() - clock, 2),
-        "max_attempts": args.max_attempts,
+        "max_attempts": max_attempts,
         "counts": {
             "open_before": len(pending),
             "revalidated": len(targets),
@@ -431,9 +522,27 @@ def cmd_revalidate(args: argparse.Namespace, registry: Registry) -> int:
             .rename("count").reset_index().to_dict("records")
         ),
         "status_totals": status["status"].value_counts().to_dict(),
+        "rules": result.rule_stats,
+        "outputs": {
+            "resolved": str(layout.corrected_round(round_number) / "resolved.csv"),
+            "next_round": str(next_dir),
+            "result": str(quality_dir / "dq_result.json"),
+        },
     }
     with (quality_dir / "dq_result.json").open("w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2, ensure_ascii=False, default=str)
+
+    return summary
+
+
+def cmd_revalidate(args: argparse.Namespace, registry: Registry) -> int:
+    layout = open_layout(args, registry)
+    summary = revalidate(layout, registry, args.max_attempts, args.all)
+
+    if summary is None:
+        print("No corrections to re-validate. Import a correction file "
+              "first (or use --all).")
+        return 0
 
     counts = summary["counts"]
     print(
@@ -443,9 +552,8 @@ def cmd_revalidate(args: argparse.Namespace, registry: Registry) -> int:
         f"{counts['discarded'] + counts['removed_as_duplicate']}, "
         f"carried over {counts['carried_over_untouched']}."
     )
-    print(f"  resolved          {layout.corrected_round(round_number) / 'resolved.csv'}")
-    print(f"  next round        {next_dir}")
-    print(f"  result            {quality_dir / 'dq_result.json'}")
+    for key, path in summary["outputs"].items():
+        print(f"  {key:<17} {path}")
     return 0
 
 

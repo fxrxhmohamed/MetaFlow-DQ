@@ -26,7 +26,7 @@ RULE_TYPES = {
     "not_null", "is_null", "allowed_values", "pattern", "range", "type",
     "unique", "compare", "derived", "functional_dependency",
     "duplicate_rows", "trim_whitespace", "null_tokens", "generate",
-    "reference", "expression",
+    "reference", "expression", "auto_fix_review",
 }
 
 GENERATE_METHODS = {"convert_currency", "case"}
@@ -73,6 +73,8 @@ ERROR_TYPES: dict[str, tuple[str, str, str]] = {
                               "{determinant} '{value}' has conflicting values on other rows"),
     "trim_whitespace": ("DQ-FMT", "format_violation", "{column} has surrounding spaces"),
     "null_tokens": ("DQ-NULL", "null", "{column} '{value}' is a null placeholder"),
+    "auto_fix_review": ("DQ-REV", "auto_fix_review",
+                        "Changed automatically, please confirm: {value}"),
 }
 
 
@@ -379,6 +381,14 @@ def _validate(registry: Registry) -> None:
 
         if rule.type == "derived" and "source" not in rule.params:
             raise ConfigError(f"{where}: derived rules need a source")
+
+        if rule.type == "auto_fix_review":
+            minimum = rule.params.get("min_changes", 3)
+            if not isinstance(minimum, int) or minimum < 1:
+                raise ConfigError(f"{where}: min_changes must be a whole number >= 1")
+            unknown = set(rule.params.get("ignore_actions") or []) - REMEDIATION_ACTIONS
+            if unknown:
+                raise ConfigError(f"{where}: unknown ignore_actions {sorted(unknown)}")
 
         if rule.type == "reference" and not rule.params.get("values"):
             raise ConfigError(f"{where}: reference list is empty")

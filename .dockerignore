@@ -7,11 +7,7 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .env
-data/raw/
-data/clean/
-data/standardized/
-data/quarantine/
-data/quality/
-data/profiling/
+# Data never goes into an image; it is mounted at run time.
+data/
 airflow/logs/
 *.log

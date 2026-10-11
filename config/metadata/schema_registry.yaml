@@ -697,8 +697,8 @@ columns:
     entity: customer
     description: Credit bureau score.
     nullable: false
-    # Can be 0 (5,517 rows, no score yet); real scores start at 408.
-    min: 0
+    # Valid bureau scores are 300-850; 0 (no score yet) is out of range.
+    min: 300
     max: 850
 
   customer_since_date:

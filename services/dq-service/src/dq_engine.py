@@ -106,6 +106,8 @@ class Batch:
     data    working text, updated by remediation; generated columns that
             the input lacks are added empty, in schema order
     active  False for rows removed as exact duplicates
+    focus   rows counted in the rule statistics (all by default; the
+            corrected records when re-validating)
     """
 
     def __init__(
@@ -113,6 +115,7 @@ class Batch:
         raw: pd.DataFrame,
         registry: Registry,
         ids: pd.Series,
+        focus: pd.Series | None = None,
     ) -> None:
         self.raw = raw
         self.data = raw.copy()
@@ -132,7 +135,14 @@ class Batch:
             self.data = self.data.reindex(columns=order).astype("string")
 
         self.active = pd.Series(True, index=raw.index)
+        self.focus = (
+            pd.Series(True, index=raw.index) if focus is None
+            else pd.Series(focus.to_numpy(), index=raw.index)
+        )
         self.failures: list[tuple[Rule, pd.Series]] = []
+        # Per rule: the text shown as an error's value, when the failing
+        # column's value says too little (e.g. what was changed).
+        self.error_values: dict[str, pd.Series] = {}
         self.audit: list[pd.DataFrame] = []
         self._typed: dict[str, pd.Series] = {}
 
@@ -147,6 +157,11 @@ class Batch:
                 self.data[column], self.spec(column),
             )
         return self._typed[column]
+
+    def count(self, mask: pd.Series) -> int:
+        """Rows of a mask that count in the rule statistics."""
+
+        return int((mask & self.focus).sum())
 
     def write(self, column: str, new_values: pd.Series) -> None:
         self.data.loc[new_values.index, column] = new_values
@@ -213,8 +228,8 @@ def run_value_rule(
     else:
         failing = detect(batch, rule, scope)
 
-    stats["checked"] += int(scope.sum())
-    stats["detected"] += int(failing.sum())
+    stats["checked"] += batch.count(scope)
+    stats["detected"] += batch.count(failing)
 
     if rule.remediation and failing.any():
         # Usually the rule's own column; derived rules may repair their
@@ -239,7 +254,7 @@ def run_value_rule(
         )
         failing = still
 
-    stats["unresolved"] += int(failing.sum())
+    stats["unresolved"] += batch.count(failing)
     stats["remediated"] = stats["detected"] - stats["unresolved"]
 
     batch.fail(rule, failing)
@@ -249,8 +264,8 @@ def run_duplicate_rows(batch: Batch, rule: Rule, stats: dict[str, Any]) -> None:
     """Exact copies of an earlier row (on the input text)."""
 
     duplicated = batch.active & batch.raw.duplicated(keep="first")
-    stats["checked"] = int(batch.active.sum())
-    stats["detected"] = int(duplicated.sum())
+    stats["checked"] = batch.count(batch.active)
+    stats["detected"] = batch.count(duplicated)
 
     if (rule.remediation or {}).get("action") == "drop_duplicates":
         index = duplicated[duplicated].index
@@ -270,8 +285,8 @@ def run_dependency(batch: Batch, rule: Rule, stats: dict[str, Any]) -> None:
     scope = batch.active & condition_mask(batch, rule.when)
     failing, per_column = functional_dependency(batch, rule, scope)
 
-    stats["checked"] = int(scope.sum())
-    stats["detected"] = stats["unresolved"] = int(failing.sum())
+    stats["checked"] = batch.count(scope)
+    stats["detected"] = stats["unresolved"] = batch.count(failing)
     stats["conflicts_by_column"] = {
         column: count for column, count in per_column.items() if count
     }
@@ -291,7 +306,7 @@ def run_generate(batch: Batch, rule: Rule, stats: dict[str, Any]) -> None:
     expected = generated_values(batch, rule)
     missing = scope & expected.isna()
 
-    stats["checked"] = int(scope.sum())
+    stats["checked"] = batch.count(scope)
 
     if column in batch.filled_columns:
         batch.write(column, expected[scope])
@@ -305,17 +320,60 @@ def run_generate(batch: Batch, rule: Rule, stats: dict[str, Any]) -> None:
                 rule, column, differs[differs].index, original,
                 "derive", "remediated",
             )
-        stats["remediated"] = int(differs.sum())
+        stats["remediated"] = batch.count(differs)
 
-    stats["unresolved"] = int(missing.sum())
+    stats["unresolved"] = batch.count(missing)
     stats["detected"] = stats["remediated"] + stats["unresolved"]
     batch.fail(rule, missing)
+
+
+def run_auto_fix_review(batch: Batch, rule: Rule, stats: dict[str, Any]) -> None:
+    """Records with many automatic repairs: a person has to confirm them.
+
+    Counts the repairs made so far (so it runs after every other rule);
+    min_changes (default 3) or more fail the rule. ignore_actions lists
+    remediation actions that do not count (e.g. trim).
+    """
+
+    minimum = int(rule.params.get("min_changes", 3))
+    ignore = set(rule.params.get("ignore_actions") or [])
+    scope = batch.active
+    stats["checked"] = batch.count(scope)
+
+    if not batch.audit:
+        return
+
+    audit = pd.concat(batch.audit, ignore_index=True)
+    edits = audit[audit["outcome"].eq("remediated") & ~audit["action"].isin(ignore)]
+    per_record = edits.groupby("record_id").size()
+    counts = batch.record_ids.map(per_record).fillna(0).astype(int)
+    failing = scope & counts.ge(minimum)
+
+    stats["detected"] = stats["unresolved"] = batch.count(failing)
+    if not failing.any():
+        return
+
+    # e.g. "3 values: transaction_time '07:19:20 PM' -> '19:19:20'; ..."
+    failing_ids = set(batch.record_ids[failing])
+    listed = edits[edits["record_id"].isin(failing_ids)]
+    described = (
+        listed["column"].astype(str) + " '"
+        + listed["original_value"].fillna("").astype(str) + "' -> '"
+        + listed["cleaned_value"].fillna("").astype(str) + "'"
+    ).groupby(listed["record_id"]).agg("; ".join)
+    batch.error_values[rule.id] = (
+        counts.astype(str) + " values: " + batch.record_ids.map(described).fillna("")
+    )
+    batch.fail(rule, failing)
 
 
 def run_rule(batch: Batch, rule: Rule) -> dict[str, Any]:
     stats = new_stats(rule)
 
-    if rule.type == "generate":
+    if rule.type == "auto_fix_review":
+        run_auto_fix_review(batch, rule, stats)
+
+    elif rule.type == "generate":
         run_generate(batch, rule, stats)
 
     elif rule.type == "duplicate_rows":
@@ -382,7 +440,8 @@ def build_errors(batch: Batch) -> pd.DataFrame:
         index = mask[mask].index
         column = error_column(batch, rule)
         values = (
-            batch.data.loc[index, column] if column in batch.data.columns
+            batch.error_values[rule.id][index] if rule.id in batch.error_values
+            else batch.data.loc[index, column] if column in batch.data.columns
             else pd.Series(pd.NA, index=index, dtype="string")
         )
 
@@ -538,13 +597,25 @@ def validate_frame(
     registry: Registry,
     ids: pd.Series,
     log: Callable[[str], None] = print,
+    focus: pd.Series | None = None,
 ) -> Validation:
-    """Run every rule on a batch and split it into valid and quarantine."""
+    """Run every rule on a batch and split it into valid and quarantine.
 
-    batch = Batch(frame.reset_index(drop=True), registry, ids)
+    focus limits the rule statistics to some rows (the others are context
+    for cross-row rules).
+    """
+
+    batch = Batch(frame.reset_index(drop=True), registry, ids, focus)
     rule_stats = []
 
-    for rule in registry.all_rules():
+    # Reviews of automatic repairs count the repairs, so they come last.
+    rules = registry.all_rules()
+    rules = (
+        [r for r in rules if r.type != "auto_fix_review"]
+        + [r for r in rules if r.type == "auto_fix_review"]
+    )
+
+    for rule in rules:
         step = time.perf_counter()
         stats = run_rule(batch, rule)
         rule_stats.append(stats)

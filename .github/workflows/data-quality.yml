@@ -1,0 +1,28 @@
+name: data-quality
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: services/*/requirements.txt
+
+      - name: Install
+        run: |
+          python -m pip install -r services/dq-service/requirements.txt \
+                                -r services/metadata-service/requirements.txt \
+                                pytest
+
+      # 50-row test dataset with one example of each defect, run through
+      # every step of dq.py (tests/test_pipeline.py).
+      - name: Test the data-quality flow
+        run: python -m pytest tests -v

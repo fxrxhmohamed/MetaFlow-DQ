@@ -56,6 +56,10 @@
 #            decimals} | case {cases: [{when, value}], default}}
 #     fills a column marked "generated" in the schema; rows whose value
 #     cannot be computed fail the rule
+#   auto_fix_review {min_changes, ignore_actions}: a record that had
+#     min_changes or more values repaired automatically fails, so a
+#     person confirms it (ACCEPT), corrects it or removes it; always
+#     checked after every other rule
 #
 # Conditions ("when")
 #   {column: c, in: [..]} | {column: c, not_in: [..]} |
@@ -313,7 +317,7 @@ schema_checks:
       type:
         remediation: {action: parse_number}
 
-    # 0-850, zero allowed.
+    # 300-850.
     credit_score:
       type:
         remediation: {action: parse_number}
@@ -723,3 +727,15 @@ rules:
     dependency: branch_location
     dimension: consistency
     severity: warning
+
+  # ---- Review of automatic repairs ----
+  # Many automatic changes in one record are too much to trust blindly:
+  # the record is held until a person accepts, corrects or removes it.
+  # Add e.g. [trim] to ignore_actions to stop counting removed spaces.
+  - id: DQ-REV-001
+    name: Records with many automatic repairs are confirmed by a person
+    type: auto_fix_review
+    min_changes: 3
+    ignore_actions: []
+    dimension: validity
+    severity: critical

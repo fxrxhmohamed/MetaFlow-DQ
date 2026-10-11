@@ -1,0 +1,34 @@
+# Local Airflow for the data-quality DAGs (airflow/dags/data_quality.py).
+#
+#   docker compose up -d --build      start (first build takes a few minutes)
+#   http://localhost:8080             Airflow UI (no login: local use only)
+#   docker compose down               stop
+#
+# The project folder is mounted at /opt/metaflow, so the DAGs read and
+# write the same data/ folder as the commands and the correction UI on
+# this machine.
+
+services:
+  airflow:
+    build:
+      context: .
+      dockerfile: airflow/Dockerfile
+    image: metaflow-airflow
+    command: standalone
+    ports:
+      - "8080:8080"
+    environment:
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/metaflow/airflow/dags
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      # Local development: everyone is admin, no login screen.
+      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "true"
+      METAFLOW_HOME: /opt/metaflow
+      METAFLOW_PYTHON: /home/airflow/metaflow-venv/bin/python
+    volumes:
+      - .:/opt/metaflow
+      - airflow-home:/opt/airflow
+    restart: unless-stopped
+
+volumes:
+  # Airflow's own database and logs.
+  airflow-home:
